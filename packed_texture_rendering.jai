@@ -28,17 +28,27 @@ find_packed_texture :: (lookup_table: *Table(string, Packed_Texture_Lookup), pat
     return result, found;
 }
 
-Packed_Texture_Rendering :: struct {
-    renderables: [..] Camera_Per_Object_Transforms_Packed_Texture_Renderable;
-    renderer: Camera_Per_Object_Transforms_Packed_Texture_Renderer;
-    metadata: Packed_Textures_Metadata;
+// you can combine this with a packed texture renderer to make life easier
+Packed_Texture_Rendering_Base :: struct {
 
+    metadata: Packed_Textures_Metadata;
     packed_texture_array_gl_id: GLuint;
     packed_texture_bounding_boxes_gl_id: GLuint;
+
 }
 
-init :: (using ptr: *Packed_Texture_Rendering) {
-    init(*renderer);
+bind_packed_textures :: (using ptrb : Packed_Texture_Rendering_Base) {
+    // bind the packed texture array to texture unit 0 so the shader can sample from it
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, packed_texture_array_gl_id);
+
+    // bind the bounding box lookup texture to texture unit 1 so the shader can read uv regions
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_1D, packed_texture_bounding_boxes_gl_id);
+}
+
+
+init :: (using ptr: *Packed_Texture_Rendering_Base) {
 
     metadata_string, metadata_read_success := read_entire_file("data/packed_textures/packed_textures.metadata");
     if !metadata_read_success {
@@ -161,13 +171,27 @@ init :: (using ptr: *Packed_Texture_Rendering) {
     // clamp to edge to avoid any out of bounds sampling issues
     glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 
+
+    log("Packed texture rendering initialized: % textures across % containers", metadata.textures.count, num_containers);
+}
+
+
+Packed_Texture_Rendering :: struct {
+    renderables: [..] Camera_Per_Object_Transforms_Packed_Texture_Renderable;
+    renderer: Camera_Per_Object_Transforms_Packed_Texture_Renderer;
+
+    using #as base : Packed_Texture_Rendering_Base;
+}
+
+init :: (using ptr : * Packed_Texture_Rendering) {
+    init(*renderer);
+    init(*base);
+
     // tell the shader which texture units correspond to which samplers
     glUseProgram(renderer.shader_program_gl_handle);
     set_packed_textures_uniform(*renderer, 0);
     set_packed_texture_bounding_boxes_uniform(*renderer, 1);
     glUseProgram(0);
-
-    log("Packed texture rendering initialized: % textures across % containers", metadata.textures.count, num_containers);
 }
 
 load_model :: (using ptr: *Packed_Texture_Rendering, base_path: string) {
@@ -177,6 +201,7 @@ load_model :: (using ptr: *Packed_Texture_Rendering, base_path: string) {
         array_add(*renderables, it);
     }
 }
+
 
 load_wavefront_into_packed_texture_renderables :: (
     model: *Wavefront_Model,
@@ -273,4 +298,13 @@ load_wavefront_into_packed_texture_renderables :: (
     }
 
     return renderables;
+}
+
+// passing a pointer because of render.
+render :: (using packed_texture_rendering : *Packed_Texture_Rendering) {
+
+    bind_packed_textures(base);
+
+    // draw all queued packed texture geometry
+    render(*renderer);
 }
