@@ -65,9 +65,11 @@ pack_textures :: (side_length_px: int = 256) {
     push_allocator(temp); // everything occurs on temporary storage
     auto_release_temp(); // when done temporary storage is reset
 
+    slog_scoped("pack_textures");
+
     texture_paths := get_texture_paths("data");
 
-    log("Found % texture paths", texture_paths.count);
+    slog("Found % texture paths", texture_paths.count);
     for texture_paths  log("  %", it);
 
     texture_blocks: [..] *Texture_Block_To_Pack;

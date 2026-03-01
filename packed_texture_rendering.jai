@@ -8,16 +8,16 @@
 
 
 Packed_Texture_Lookup :: struct {
-    metadata_index: s64;
-    container_index: s64;
+    metadata_index: s32; // what is this again?
+    container_index: s32;
 }
 
 build_packed_texture_lookup_table :: (metadata: *Packed_Textures_Metadata) -> Table(string, Packed_Texture_Lookup) {
     table: Table(string, Packed_Texture_Lookup);
     for tex, idx: metadata.textures {
         table_add(*table, tex.path, Packed_Texture_Lookup.{
-            metadata_index = cast(s64) idx,
-            container_index = cast(s64) tex.container_index,
+            metadata_index = cast(s32) idx,
+            container_index = cast(s32) tex.container_index,
         });
     }
     return table;
@@ -49,6 +49,8 @@ bind_packed_textures :: (using ptrb : Packed_Texture_Rendering_Base) {
 
 
 init :: (using ptr: *Packed_Texture_Rendering_Base) {
+
+    slog_scoped("init packed_texture_rendering_base");
 
     metadata_string, metadata_read_success := read_entire_file("data/packed_textures/packed_textures.metadata");
     if !metadata_read_success {
@@ -110,7 +112,8 @@ init :: (using ptr: *Packed_Texture_Rendering_Base) {
 
     // flip images vertically on load because stbi loads with y=0 at the top
     // but opengl expects y=0 at the bottom
-    stbi_set_flip_vertically_on_load(1);
+    // for some reason when I flipp it messes up all the bounding boxes so I can't do it and now it works, need to explain thisout.
+    // stbi_set_flip_vertically_on_load(1);
 
     // load each container image from disk and upload it into its corresponding layer in the texture array
     for container_idx: 0..num_containers - 1 {
@@ -145,11 +148,16 @@ init :: (using ptr: *Packed_Texture_Rendering_Base) {
             log_error("Too many packed textures (%), exceeds MAX_NUM_TEXTURES", metadata.textures.count);
             break;
         }
-        u_min := cast(float) tex.top_left_x / cast(float) side;
-        v_min := cast(float) tex.top_left_y / cast(float) side;
-        u_max := cast(float) (tex.top_left_x + tex.w) / cast(float) side;
-        v_max := cast(float) (tex.top_left_y + tex.h) / cast(float) side;
-        bounding_boxes[tex_idx] = .{u_min, v_min, u_max, v_max};
+        u_min  := cast(float) tex.top_left_x / cast(float) side;
+        v_min  := cast(float) tex.top_left_y / cast(float) side;
+        width  := cast(float) tex.w / cast(float) side;
+        height := cast(float) tex.h / cast(float) side;
+        bounding_boxes[tex_idx] = .{u_min, v_min, width, height};
+
+        slog("bbox[%] path='%' container=% | top_left=(%,%) size=(%x%) | uv: u_min=% v_min=% width=% height=%",
+            tex_idx, tex.path, tex.container_index,
+            tex.top_left_x, tex.top_left_y, tex.w, tex.h,
+            u_min, v_min, width, height);
     }
 
     // make texture unit 1 the active unit for the bounding box texture
