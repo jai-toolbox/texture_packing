@@ -6,6 +6,7 @@
 #import "tbx/opengl";
 #import "tbx/model_loading";
 
+USING_OPENGL :: true;
 
 Packed_Texture_Lookup :: struct {
     metadata_index: s32; // what is this again?
@@ -113,7 +114,8 @@ init :: (using ptr: *Packed_Texture_Rendering_Base) {
     // flip images vertically on load because stbi loads with y=0 at the top
     // but opengl expects y=0 at the bottom
     // for some reason when I flipp it messes up all the bounding boxes so I can't do it and now it works, need to explain thisout.
-    // stbi_set_flip_vertically_on_load(1);
+
+    if USING_OPENGL stbi_set_flip_vertically_on_load(1);
 
     // load each container image from disk and upload it into its corresponding layer in the texture array
     for container_idx: 0..num_containers - 1 {
@@ -148,10 +150,19 @@ init :: (using ptr: *Packed_Texture_Rendering_Base) {
             log_error("Too many packed textures (%), exceeds MAX_NUM_TEXTURES", metadata.textures.count);
             break;
         }
+
         u_min  := cast(float) tex.top_left_x / cast(float) side;
         v_min  := cast(float) tex.top_left_y / cast(float) side;
         width  := cast(float) tex.w / cast(float) side;
         height := cast(float) tex.h / cast(float) side;
+
+        if USING_OPENGL {
+            // The image was flipped, so the top_left_y in metadata
+            // (measured from top) needs to become measured from bottom.
+            // new_v_min = 1.0 - (v_min + height)
+            v_min = 1.0 - v_min - height;
+        }
+
         bounding_boxes[tex_idx] = .{u_min, v_min, width, height};
 
         slog("bbox[%] path='%' container=% | top_left=(%,%) size=(%x%) | uv: u_min=% v_min=% width=% height=%",
@@ -263,10 +274,35 @@ load_wavefront_into_packed_texture_renderables :: (
                 }
                 array_add(*renderable.positions, pos);
 
-                // texture coordinate
                 tc: Vector2;
                 if fv.texture_coordinate_index >= 0 && fv.texture_coordinate_index < model.obj_data.all_texture_coordinates.count {
                     tc = model.obj_data.all_texture_coordinates[fv.texture_coordinate_index];
+
+                    if has_texture {
+                        // the metadata stores: top_left_x, top_left_y, w, h in pixel space
+                        // convert the model's [0,1] uvs into the sub-region of the packed texture
+                        side := cast(float) metadata.side_length_px;
+
+                        u_min  := cast(float) metadata.textures[tex_lookup.metadata_index].top_left_x / side;
+                        v_min  := cast(float) metadata.textures[tex_lookup.metadata_index].top_left_y / side;
+                        width  := cast(float) metadata.textures[tex_lookup.metadata_index].w / side;
+                        height := cast(float) metadata.textures[tex_lookup.metadata_index].h / side;
+
+
+
+                        if USING_OPENGL v_min = 1.0 - v_min - height;
+
+                        /* 
+                        at this point in time if we're using opengl then we know the following:
+                        - the image was flipped on load to match opengl's y=0 at the bottom of the image
+                        - v_min was flipped to match the flipped image
+                        - the obj spec says that uv is the bottom left of the image, because everything is adjust this works.
+                        */
+
+                        // remap from [0,1] individual texture space into packed atlas space
+                        tc.x = u_min + tc.x * width;
+                        tc.y = v_min + tc.y * height;
+                    }
                 }
                 array_add(*renderable.texture_coordinates, tc);
 

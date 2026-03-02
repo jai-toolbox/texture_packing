@@ -59,15 +59,21 @@ Packed_Textures_Metadata :: struct {
     textures: [..] Packed_Texture;
 }
 
-pack_textures :: (side_length_px: int = 256) {
+pack_textures :: (side_length_px: int = 256, force: bool = false) {
+
     // the following lines let me do new anywhere and not have to care about memory because
     // after this function is done all required data is stored to file.
     push_allocator(temp); // everything occurs on temporary storage
-    auto_release_temp(); // when done temporary storage is reset
+    auto_release_temp(); // when done temporary storage is reset, this is probably unnessary as someone's going to reset temp storage at some point.
 
     slog_scoped("pack_textures");
 
     texture_paths := get_texture_paths("data");
+
+    if !force && !should_repack(texture_paths) {
+        slog("All textures up to date, skipping repack.");
+        return;
+    }
 
     slog("Found % texture paths", texture_paths.count);
     for texture_paths  log("  %", it);
@@ -186,4 +192,6 @@ pack_textures :: (side_length_px: int = 256) {
     } else {
         log_error("Failed to serialize packed texture metadata");
     }
+
+    save_pack_manifest(texture_paths);
 }
