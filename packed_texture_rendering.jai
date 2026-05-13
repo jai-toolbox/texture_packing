@@ -5,6 +5,7 @@
 
 #import "tbx/opengl";
 #import "tbx/model_loading";
+#import "tbx/assets";
 
 USING_OPENGL :: true;
 
@@ -53,7 +54,7 @@ init :: (using ptr: *Packed_Texture_Rendering_Base) {
 
     slog_scoped("init packed_texture_rendering_base");
 
-    metadata_string, metadata_read_success := read_entire_file("data/packed_textures/packed_textures.metadata");
+    metadata_read_success, metadata_string := load_asset("data/packed_textures/packed_textures.metadata");
     if !metadata_read_success {
         log_error("Failed to read packed textures metadata file");
         return;
@@ -121,7 +122,11 @@ init :: (using ptr: *Packed_Texture_Rendering_Base) {
     for container_idx: 0..num_containers - 1 {
         container_path := tprint("data/packed_textures/packed_texture_%.png", container_idx);
         img_w, img_h, img_channels: s32;
-        pixels := stbi_load(temp_c_string(container_path), *img_w, *img_h, *img_channels, 4);
+        image_loaded, image_data := load_asset(container_path);
+        pixels: *u8;
+        if image_loaded {
+            pixels = stbi_load_from_memory(image_data.data, xx image_data.count, *img_w, *img_h, *img_channels, 4);
+        }
         if pixels != null {
             if img_w != xx side || img_h != xx side {
                 log_error("Container % has unexpected dimensions: %x% (expected %x%)", container_idx, img_w, img_h, side, side);
