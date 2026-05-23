@@ -26,7 +26,7 @@ build_packed_texture_lookup_table :: (metadata: *Packed_Textures_Metadata) -> Ta
 }
 
 find_packed_texture :: (lookup_table: *Table(string, Packed_Texture_Lookup), path: string) -> Packed_Texture_Lookup, bool {
-    result, found := table_find(lookup_table, path);
+    found, result := table_find(lookup_table, path);
     return result, found;
 }
 

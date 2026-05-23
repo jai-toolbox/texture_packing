@@ -104,6 +104,14 @@ Split_Packer :: struct {
     root: *Packed_Block_Node;
 }
 
+split_packer_profile_calls: u64;
+split_packer_profile_max_depth: int;
+
+reset_split_packer_profile :: () {
+    split_packer_profile_calls = 0;
+    split_packer_profile_max_depth = 0;
+}
+
 make_packed_block_node :: (x: int, y: int, w: int, h: int) -> *Packed_Block_Node {
     node := New(Packed_Block_Node);
     node.top_left_x = x;
@@ -126,31 +134,50 @@ make_split_packer :: (width: int, height: int) -> Split_Packer {
     return packer;
 }
 
-find_node_with_enough_space_rec :: (node: *Packed_Block_Node, width: int, height: int) -> *Packed_Block_Node {
+find_node_with_enough_space_rec :: (node: *Packed_Block_Node, width: int, height: int, depth: int = 1) -> *Packed_Block_Node {
     if node == null then return null;
 
-    if node.used {
-        right_node := find_node_with_enough_space_rec(node.right, width, height);
-        if right_node != null then return right_node;
-        return find_node_with_enough_space_rec(node.down, width, height);
-    } else if width <= node.w && height <= node.h {
-        node.used = true;
-        node.right = make_packed_block_node(
-            node.top_left_x + width,
-            node.top_left_y,
-            node.w - width,
-            height
-        );
-        node.down = make_packed_block_node(
-            node.top_left_x,
-            node.top_left_y + height,
-            node.w,
-            node.h - height
-        );
-        return node;
-    } else {
-        return null;
+    Stack_Entry :: struct {
+        node: *Packed_Block_Node;
+        depth: int;
     }
+
+    stack: [..] Stack_Entry;
+    defer array_free(stack);
+    array_add(*stack, .{node, depth});
+
+    while stack.count > 0 {
+        entry := pop(*stack);
+
+        split_packer_profile_calls += 1;
+        if entry.depth > split_packer_profile_max_depth split_packer_profile_max_depth = entry.depth;
+
+        current := entry.node;
+        if current == null continue;
+
+        if current.used {
+            // Push down first so right is processed first, matching the old recursion.
+            if current.down  != null array_add(*stack, .{current.down,  entry.depth + 1});
+            if current.right != null array_add(*stack, .{current.right, entry.depth + 1});
+        } else if width <= current.w && height <= current.h {
+            current.used = true;
+            current.right = make_packed_block_node(
+                current.top_left_x + width,
+                current.top_left_y,
+                current.w - width,
+                height
+            );
+            current.down = make_packed_block_node(
+                current.top_left_x,
+                current.top_left_y + height,
+                current.w,
+                current.h - height
+            );
+            return current;
+        }
+    }
+
+    return null;
 }
 
 fit :: (packer: *Split_Packer, blocks: [] *Block_To_Pack) {

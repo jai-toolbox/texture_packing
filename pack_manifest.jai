@@ -55,7 +55,7 @@ should_repack :: (current_paths: [..] string) -> bool {
     for current_paths {
         mod_low, mod_high := file_modtime_parts(it);
 
-        old_record, found := table_find(*old_records, it);
+        found, old_record := table_find(*old_records, it);
         if !found {
             log("New file detected: '%' repacking.", it);
             return true;
@@ -72,7 +72,7 @@ should_repack :: (current_paths: [..] string) -> bool {
     for current_paths  table_add(*current_set, it, true);
 
     for old_manifest.records {
-        _, found := table_find(*current_set, it.path);
+        found, _ := table_find(*current_set, it.path);
         if !found {
             log("Deleted file detected: '%' — repacking.", it.path);
             return true;
