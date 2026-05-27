@@ -104,9 +104,9 @@ init :: (using ptr: *Packed_Texture_Rendering_Base) {
     // allocate gpu storage for the 2d texture array with one layer per container, rgba8 format
     glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, xx side, xx side, xx num_containers, 0, GL_RGBA, GL_UNSIGNED_BYTE, null);
 
-    // use nearest neighbor filtering so pixel art and packed textures stay sharp
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    // PBR material textures should interpolate smoothly; nearest filtering makes them look blocky.
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
     // clamp to edge so we don't bleed into neighboring packed textures at boundaries
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);

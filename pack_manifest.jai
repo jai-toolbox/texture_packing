@@ -16,17 +16,20 @@ We use modification time as "file has changed", note that this is not necessaril
 
 Texture_File_Record :: struct {
     path: string;
+    size: s64;
+    content_hash: u64;
     modification_time_low:  u64;
     modification_time_high: s64;
 }
 
 Texture_Pack_Manifest :: struct {
+    side_length_px: int;
     records: [..] Texture_File_Record;
 }
 
 MANIFEST_PATH :: "data/packed_textures/pack_manifest.metadata";
 
-should_repack :: (current_paths: [..] string) -> bool {
+should_repack :: (current_paths: [..] string, side_length_px: int) -> bool {
 
     manifest_string, manifest_ok := read_entire_file(MANIFEST_PATH);
     if !manifest_ok {
@@ -37,6 +40,11 @@ should_repack :: (current_paths: [..] string) -> bool {
     old_manifest, deserialize_ok := from_string(manifest_string, Texture_Pack_Manifest);
     if !deserialize_ok {
         log("Failed to deserialize pack manifest repacking.");
+        return true;
+    }
+
+    if old_manifest.side_length_px != side_length_px {
+        log("Packed texture side length changed (% vs %) repacking.", side_length_px, old_manifest.side_length_px);
         return true;
     }
 
@@ -53,7 +61,7 @@ should_repack :: (current_paths: [..] string) -> bool {
     }
 
     for current_paths {
-        mod_low, mod_high := file_modtime_parts(it);
+        sig := get_texture_file_record(it);
 
         found, old_record := table_find(*old_records, it);
         if !found {
@@ -61,7 +69,7 @@ should_repack :: (current_paths: [..] string) -> bool {
             return true;
         }
 
-        if mod_low != old_record.modification_time_low || mod_high != old_record.modification_time_high {
+        if sig.size != old_record.size || sig.content_hash != old_record.content_hash {
             log("Modified file detected: '%' repacking.", it);
             return true;
         }
@@ -83,19 +91,40 @@ should_repack :: (current_paths: [..] string) -> bool {
     return false;
 }
 
-file_modtime_parts :: (path: string) -> u64, s64 {
+file_modtime_parts :: (path: string) -> u64, s64, s64 {
     modtime, size, ok := file_modtime_and_size(path);
-    if !ok return 0, 0;
-    return modtime.low, modtime.high;
+    if !ok return 0, 0, 0;
+    return modtime.low, modtime.high, size;
 }
 
-save_pack_manifest :: (texture_paths: [] string) {
+hash_file_contents :: (path: string) -> u64 {
+    data, ok := read_entire_file(path);
+    if !ok return 0;
+
+    hash: u64 = 14695981039346656037;
+    FNV_PRIME :: 1099511628211;
+    for data {
+        hash ^= cast(u64) it;
+        hash *= FNV_PRIME;
+    }
+
+    return hash;
+}
+
+get_texture_file_record :: (path: string) -> Texture_File_Record {
+    record: Texture_File_Record;
+    record.path = path;
+    record.modification_time_low, record.modification_time_high, record.size = file_modtime_parts(path);
+    record.content_hash = hash_file_contents(path);
+    return record;
+}
+
+save_pack_manifest :: (texture_paths: [] string, side_length_px: int) {
     manifest: Texture_Pack_Manifest;
+    manifest.side_length_px = side_length_px;
 
     for texture_paths {
-        record: Texture_File_Record;
-        record.path = it;
-        record.modification_time_low, record.modification_time_high = file_modtime_parts(it);
+        record := get_texture_file_record(it);
         array_add(*manifest.records, record);
     }
 

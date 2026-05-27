@@ -59,7 +59,7 @@ Packed_Textures_Metadata :: struct {
     textures: [..] Packed_Texture;
 }
 
-pack_textures :: (side_length_px: int = 256, force: bool = false) {
+pack_textures :: (side_length_px: int = 256, force: bool = false, texture_directory: string) {
 
     // the following lines let me do new anywhere and not have to care about memory because
     // after this function is done all required data is stored to file.
@@ -68,9 +68,9 @@ pack_textures :: (side_length_px: int = 256, force: bool = false) {
 
     slog_scoped("pack_textures");
 
-    texture_paths := get_texture_paths("data");
+    texture_paths := get_texture_paths(texture_directory);
 
-    if !force && !should_repack(texture_paths) {
+    if !force && !should_repack(texture_paths, side_length_px) {
         slog("All textures up to date, skipping repack.");
         return;
     }
@@ -193,5 +193,5 @@ pack_textures :: (side_length_px: int = 256, force: bool = false) {
         log_error("Failed to serialize packed texture metadata");
     }
 
-    save_pack_manifest(texture_paths);
+    save_pack_manifest(texture_paths, side_length_px);
 }
