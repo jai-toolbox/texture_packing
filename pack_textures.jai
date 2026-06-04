@@ -17,13 +17,26 @@ get_texture_paths :: (directory: string) -> [..] string {
 
         ext := path_extension(info.full_name);
         if ext == "png" || ext == "jpg" || ext == "tga" || ext == "jpeg" {
-            array_add(paths, copy_string(info.full_name));
+            normalized_path := copy_string(info.full_name);
+            normalize_slashes(normalized_path);
+            array_add(paths, normalized_path);
         }
     };
 
     visit_files(directory, recursive = true, *image_file_paths, visitor, visit_directories = true);
 
     return image_file_paths;
+}
+
+get_texture_paths :: (directories: [] string) -> [..] string {
+    result: [..] string;
+
+    for directories {
+        paths := get_texture_paths(it);
+        for paths array_add(*result, it);
+    }
+
+    return result;
 }
 
 Texture_Block_To_Pack :: struct { 
@@ -59,7 +72,9 @@ Packed_Textures_Metadata :: struct {
     textures: [..] Packed_Texture;
 }
 
-pack_textures :: (side_length_px: int = 256, force: bool = false, texture_directory: string) {
+pack_texture_paths :: (side_length_px: int, force: bool, texture_paths: [..] string) {
+    stbi_set_flip_vertically_on_load(0);
+    defer stbi_set_flip_vertically_on_load(0);
 
     // the following lines let me do new anywhere and not have to care about memory because
     // after this function is done all required data is stored to file.
@@ -67,8 +82,6 @@ pack_textures :: (side_length_px: int = 256, force: bool = false, texture_direct
     auto_release_temp(); // when done temporary storage is reset, this is probably unnessary as someone's going to reset temp storage at some point.
 
     slog_scoped("pack_textures");
-
-    texture_paths := get_texture_paths(texture_directory);
 
     if !force && !should_repack(texture_paths, side_length_px) {
         slog("All textures up to date, skipping repack.");
@@ -194,4 +207,14 @@ pack_textures :: (side_length_px: int = 256, force: bool = false, texture_direct
     }
 
     save_pack_manifest(texture_paths, side_length_px);
+}
+
+pack_textures :: (side_length_px: int = 256, force: bool = false, texture_directory: string) {
+    texture_paths := get_texture_paths(texture_directory);
+    pack_texture_paths(side_length_px, force, texture_paths);
+}
+
+pack_textures :: (side_length_px: int = 256, force: bool = false, texture_directories: [] string) {
+    texture_paths := get_texture_paths(texture_directories);
+    pack_texture_paths(side_length_px, force, texture_paths);
 }

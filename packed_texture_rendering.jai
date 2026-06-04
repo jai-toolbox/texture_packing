@@ -8,6 +8,7 @@
 #import "tbx/assets";
 
 USING_OPENGL :: true;
+PACKED_TEXTURE_VERBOSE_LOGGING :: false;
 
 Packed_Texture_Lookup :: struct {
     metadata_index: s32; // what is this again?
@@ -170,10 +171,12 @@ init :: (using ptr: *Packed_Texture_Rendering_Base) {
 
         bounding_boxes[tex_idx] = .{u_min, v_min, width, height};
 
-        slog("bbox[%] path='%' container=% | top_left=(%,%) size=(%x%) | uv: u_min=% v_min=% width=% height=%",
-            tex_idx, tex.path, tex.container_index,
-            tex.top_left_x, tex.top_left_y, tex.w, tex.h,
-            u_min, v_min, width, height);
+        #if PACKED_TEXTURE_VERBOSE_LOGGING {
+            slog("bbox[%] path='%' container=% | top_left=(%,%) size=(%x%) | uv: u_min=% v_min=% width=% height=%",
+                tex_idx, tex.path, tex.container_index,
+                tex.top_left_x, tex.top_left_y, tex.w, tex.h,
+                u_min, v_min, width, height);
+        }
     }
 
     // make texture unit 1 the active unit for the bounding box texture
