@@ -113,11 +113,11 @@ init :: (using ptr: *Packed_Texture_Rendering_Base) {
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    // flip images vertically on load because stbi loads with y=0 at the top
-    // but opengl expects y=0 at the bottom
-    // for some reason when I flipp it messes up all the bounding boxes so I can't do it and now it works, need to explain thisout.
-
-    if USING_OPENGL stbi_set_flip_vertically_on_load(1);
+    // Keep packed atlas uploads in the same row order used by the source
+    // textures and by the direct glTF texture upload path. Flipping the atlas
+    // here mirrors every packed sub-rectangle vertically, which makes glTF UVs
+    // sample the wrong part of shared packed layers.
+    stbi_set_flip_vertically_on_load(0);
 
     // load each container image from disk and upload it into its corresponding layer in the texture array
     for container_idx: 0..num_containers - 1 {
@@ -161,13 +161,6 @@ init :: (using ptr: *Packed_Texture_Rendering_Base) {
         v_min  := cast(float) tex.top_left_y / cast(float) side;
         width  := cast(float) tex.w / cast(float) side;
         height := cast(float) tex.h / cast(float) side;
-
-        if USING_OPENGL {
-            // The image was flipped, so the top_left_y in metadata
-            // (measured from top) needs to become measured from bottom.
-            // new_v_min = 1.0 - (v_min + height)
-            v_min = 1.0 - v_min - height;
-        }
 
         bounding_boxes[tex_idx] = .{u_min, v_min, width, height};
 
