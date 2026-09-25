@@ -15,6 +15,25 @@ Packed_Texture_Lookup :: struct {
     container_index: s32;
 }
 
+
+downsampling_will_not_mix_packed_texture_with_neighbors :: (
+    texture: Packed_Texture,
+    base_level_pixels_per_downsampled_texel: int,
+) -> bool {
+    texture_has_at_least_one_downsampled_texel_per_axis :=
+        base_level_pixels_per_downsampled_texel <= texture.w
+        && base_level_pixels_per_downsampled_texel <= texture.h;
+
+    all_texture_edges_are_on_downsampled_texel_boundaries :=
+        texture.top_left_x % base_level_pixels_per_downsampled_texel == 0
+        && texture.top_left_y % base_level_pixels_per_downsampled_texel == 0
+        && (texture.top_left_x + texture.w) % base_level_pixels_per_downsampled_texel == 0
+        && (texture.top_left_y + texture.h) % base_level_pixels_per_downsampled_texel == 0;
+
+    return texture_has_at_least_one_downsampled_texel_per_axis
+        && all_texture_edges_are_on_downsampled_texel_boundaries;
+}
+
 build_packed_texture_lookup_table :: (metadata: *Packed_Textures_Metadata) -> Table(string, Packed_Texture_Lookup) {
     table: Table(string, Packed_Texture_Lookup);
     for tex, idx: metadata.textures {
@@ -37,21 +56,31 @@ Packed_Texture_Rendering_Base :: struct {
     metadata: Packed_Textures_Metadata;
     packed_texture_array_gl_id: GLuint;
     packed_texture_bounding_boxes_gl_id: GLuint;
+    packed_texture_max_mip_level: s32;
 
 }
 
 bind_packed_textures :: (using ptrb : Packed_Texture_Rendering_Base) {
     // bind the packed texture array to texture unit 0 so the shader can sample from it
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D_ARRAY, packed_texture_array_gl_id);
+    gl_set_active_texture_unit(GL_TEXTURE0);
+    gl_bind_texture_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY,
+        packed_texture_array_gl_id,
+    );
 
     // bind the bounding box lookup texture to texture unit 1 so the shader can read uv regions
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_1D, packed_texture_bounding_boxes_gl_id);
+    gl_set_active_texture_unit(GL_TEXTURE1);
+    gl_bind_texture_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_1D,
+        packed_texture_bounding_boxes_gl_id,
+    );
 }
 
 
-init :: (using ptr: *Packed_Texture_Rendering_Base) {
+init :: (
+    using ptr: *Packed_Texture_Rendering_Base,
+    generate_mipmaps: bool = false,
+) {
 
     slog_scoped("init packed_texture_rendering_base");
 
@@ -88,30 +117,48 @@ init :: (using ptr: *Packed_Texture_Rendering_Base) {
 
     // reset pixel store parameters to defaults so that no previous opengl state
     // from simp or other renderers corrupts our texture upload
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+    gl_set_integer_pixel_storage_parameter(GL_UNPACK_ALIGNMENT, 1);
+    gl_set_integer_pixel_storage_parameter(GL_UNPACK_ROW_LENGTH, 0);
+    gl_set_integer_pixel_storage_parameter(GL_UNPACK_SKIP_PIXELS, 0);
+    gl_set_integer_pixel_storage_parameter(GL_UNPACK_SKIP_ROWS, 0);
 
     // make texture unit 0 the active unit so subsequent texture operations apply to it
-    glActiveTexture(GL_TEXTURE0);
+    gl_set_active_texture_unit(GL_TEXTURE0);
 
     // generate a single texture name for our 2d texture array
-    glGenTextures(1, *packed_texture_array_gl_id);
+    packed_texture_array_gl_id = gl_create_texture();
 
     // bind the texture array so we can configure and upload data into it
-    glBindTexture(GL_TEXTURE_2D_ARRAY, packed_texture_array_gl_id);
+    gl_bind_texture_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY,
+        packed_texture_array_gl_id,
+    );
 
     // allocate gpu storage for the 2d texture array with one layer per container, rgba8 format
-    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, xx side, xx side, xx num_containers, 0, GL_RGBA, GL_UNSIGNED_BYTE, null);
+    gl_define_3d_image_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY,
+        0,
+        GL_RGBA8,
+        xx side,
+        xx side,
+        xx num_containers,
+        0,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        null,
+    );
 
     // PBR material textures should interpolate smoothly; nearest filtering makes them look blocky.
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
     // clamp to edge so we don't bleed into neighboring packed textures at boundaries
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
     // Keep packed atlas uploads in the same row order used by the source
     // textures and by the direct glTF texture upload path. Flipping the atlas
@@ -133,10 +180,70 @@ init :: (using ptr: *Packed_Texture_Rendering_Base) {
                 log_error("Container % has unexpected dimensions: %x% (expected %x%)", container_idx, img_w, img_h, side, side);
             }
             // upload this container's pixel data into the corresponding layer of the 2d texture array
-            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, xx container_idx, xx img_w, xx img_h, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+            gl_update_3d_subimage_of_texture_bound_to_binding_target_of_active_texture_unit(
+                GL_TEXTURE_2D_ARRAY,
+                0,
+                0,
+                0,
+                xx container_idx,
+                xx img_w,
+                xx img_h,
+                1,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                pixels,
+            );
             stbi_image_free(pixels);
         } else {
             log_error("Failed to load container image: %", container_path);
+        }
+    }
+
+    // Mip levels dramatically reduce cache pressure for distant surfaces.
+    // Only expose levels where every packed rectangle remains aligned to the
+    // mip texel grid. That prevents glGenerateMipmap from averaging adjacent
+    // packed materials together while it downsamples the container.
+    if generate_mipmaps {
+        max_safe_mip_level := 30;
+        for texture: metadata.textures {
+            texture_safe_mip_level := 0;
+            base_level_pixels_per_downsampled_texel := 2;
+            while downsampling_will_not_mix_packed_texture_with_neighbors(
+                texture,
+                base_level_pixels_per_downsampled_texel,
+            ) {
+                texture_safe_mip_level += 1;
+                base_level_pixels_per_downsampled_texel *= 2;
+            }
+            max_safe_mip_level = min(
+                max_safe_mip_level,
+                texture_safe_mip_level);
+        }
+
+        if max_safe_mip_level > 0 {
+            packed_texture_max_mip_level = cast(s32) max_safe_mip_level;
+            gl_generate_mipmap_levels_for_texture_bound_to_binding_target_of_active_texture_unit(
+                GL_TEXTURE_2D_ARRAY);
+            gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+                GL_TEXTURE_2D_ARRAY,
+                GL_TEXTURE_MAX_LEVEL,
+                packed_texture_max_mip_level);
+            gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+                GL_TEXTURE_2D_ARRAY,
+                GL_TEXTURE_MIN_FILTER,
+                GL_LINEAR_MIPMAP_LINEAR);
+            if gl.GL_EXT_texture_filter_anisotropic {
+                maximum_anisotropy: GLfloat;
+                gl_get_float_values_for_state_parameter(
+                    GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT,
+                    *maximum_anisotropy);
+                gl_set_float_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+                    GL_TEXTURE_2D_ARRAY,
+                    GL_TEXTURE_MAX_ANISOTROPY_EXT,
+                    min(4.0, maximum_anisotropy));
+            }
+            log("Packed material textures use % safe mip level(s)",
+                packed_texture_max_mip_level);
         }
     }
 
@@ -144,7 +251,7 @@ init :: (using ptr: *Packed_Texture_Rendering_Base) {
     stbi_set_flip_vertically_on_load(0);
 
     // restore default alignment after we're done uploading
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    gl_set_integer_pixel_storage_parameter(GL_UNPACK_ALIGNMENT, 4);
 
     // now build the 1d texture that stores bounding boxes for each packed texture
     // each texel is a vec4 holding the normalized uv region within its container
@@ -173,23 +280,38 @@ init :: (using ptr: *Packed_Texture_Rendering_Base) {
     }
 
     // make texture unit 1 the active unit for the bounding box texture
-    glActiveTexture(GL_TEXTURE1);
+    gl_set_active_texture_unit(GL_TEXTURE1);
 
     // generate a texture name for the 1d bounding box lookup texture
-    glGenTextures(1, *packed_texture_bounding_boxes_gl_id);
+    packed_texture_bounding_boxes_gl_id = gl_create_texture();
 
     // bind it so we can configure and upload data
-    glBindTexture(GL_TEXTURE_1D, packed_texture_bounding_boxes_gl_id);
+    gl_bind_texture_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_1D,
+        packed_texture_bounding_boxes_gl_id,
+    );
 
     // upload the bounding box data as a 1d texture with rgba32f so each texel holds four floats
-    glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA32F, MAX_NUM_TEXTURES, 0, GL_RGBA, GL_FLOAT, bounding_boxes.data);
+    gl_define_1d_image_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_1D,
+        0,
+        GL_RGBA32F,
+        MAX_NUM_TEXTURES,
+        0,
+        GL_RGBA,
+        GL_FLOAT,
+        bounding_boxes.data,
+    );
 
     // use nearest filtering since we're looking up exact texel values by index
-    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
     // clamp to edge to avoid any out of bounds sampling issues
-    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 
 
     log("Packed texture rendering initialized: % textures across % containers", metadata.textures.count, num_containers);
@@ -208,10 +330,10 @@ init :: (using ptr : * Packed_Texture_Rendering) {
     init(*base);
 
     // tell the shader which texture units correspond to which samplers
-    glUseProgram(renderer.shader_program_gl_handle);
+    gl_set_active_shader_program(renderer.shader_program_gl_handle);
     set_packed_textures_uniform(*renderer, 0);
     set_packed_texture_bounding_boxes_uniform(*renderer, 1);
-    glUseProgram(0);
+    gl_clear_active_shader_program();
 }
 
 load_model :: (using ptr: *Packed_Texture_Rendering, base_path: string) {
