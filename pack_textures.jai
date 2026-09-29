@@ -44,8 +44,10 @@ Texture_Block_To_Pack :: struct {
 
     path: string;
     
-    // todo in the future we might need recursion for when the texture you just packed is an atlas right?
-    // potentially not though. maybe all we need is a conversion function or something like that.
+    /*
+    todo in the future we might need recursion for when the texture you just packed is an atlas right?
+    potentially not though. maybe all we need is a conversion function or something like that.
+    */
 }
 
 Packed_Texture_Container :: struct {
@@ -72,12 +74,122 @@ Packed_Textures_Metadata :: struct {
     textures: [..] Packed_Texture;
 }
 
+recommended_texture_pack_side_length :: (
+    texture_paths: [] string,
+    minimum_side_length: int = 1024,
+    maximum_side_length: int = 4096,
+) -> int {
+    largest_dimension := 0;
+    for path: texture_paths {
+        w, h, channels: s32;
+        if stbi_info(temp_c_string(path), *w, *h, *channels) {
+            largest_dimension = max(largest_dimension, cast(int) max(w, h));
+        }
+    }
+
+    side_length := 1;
+    while side_length < largest_dimension side_length *= 2;
+    return min(max(side_length, minimum_side_length), maximum_side_length);
+}
+
+append_packed_texture_using_allocator :: (
+    metadata: *Packed_Textures_Metadata,
+    packed_texture: Packed_Texture,
+    allocator: Allocator,
+) {
+    push_allocator(allocator);
+    persistent_texture := packed_texture;
+    persistent_texture.path = copy_string(packed_texture.path);
+    array_add(*metadata.textures, persistent_texture);
+}
+
+/*
+computes atlas placement without creating, encoding, or writing atlas
+images. The returned metadata owns its path strings and can be kept by a
+renderer after the temporary packing nodes are released.
+*/
+build_packed_texture_metadata :: (
+    side_length_px: int,
+    texture_paths: [] string,
+) -> Packed_Textures_Metadata {
+    metadata: Packed_Textures_Metadata;
+    result_allocator := context.allocator;
+    push_allocator(temp);
+    auto_release_temp();
+
+    texture_blocks: [..] *Texture_Block_To_Pack;
+    for path: texture_paths {
+        w, h, channels: s32;
+        if !stbi_info(temp_c_string(path), *w, *h, *channels) {
+            log_error("Failed to read image info: %", path);
+            continue;
+        }
+
+        block := New(Texture_Block_To_Pack);
+        block.w = cast(int) w;
+        block.h = cast(int) h;
+        block.path = path;
+        array_add(*texture_blocks, block);
+    }
+
+    quick_sort(texture_blocks, (a, b) => b.h - a.h);
+
+    containers: [..] Packed_Texture_Container;
+    for block: texture_blocks {
+        placed := false;
+        for *container: containers {
+            fit(*container.packer, block);
+            if block.packed_placement != null {
+                array_add(*container.blocks, block);
+                placed = true;
+                break;
+            }
+        }
+
+        if !placed {
+            new_container: Packed_Texture_Container;
+            new_container.packer = make_split_packer(side_length_px, side_length_px);
+            fit(*new_container.packer, block);
+            if block.packed_placement != null {
+                array_add(*new_container.blocks, block);
+                array_add(*containers, new_container);
+            } else {
+                log_error("Texture '%' (%x%) too large for %x% container",
+                    block.path, block.w, block.h, side_length_px, side_length_px);
+            }
+        }
+    }
+
+    metadata.side_length_px = side_length_px;
+    for container, container_index: containers {
+        for block: container.blocks {
+            placement := block.packed_placement;
+            if placement == null continue;
+            append_packed_texture_using_allocator(
+                *metadata,
+                .{
+                    top_left_x = placement.top_left_x,
+                    top_left_y = placement.top_left_y,
+                    w = block.w,
+                    h = block.h,
+                    path = block.path,
+                    container_index = container_index,
+                },
+                result_allocator,
+            );
+        }
+    }
+    return metadata;
+}
+
 pack_texture_paths :: (side_length_px: int, force: bool, texture_paths: [..] string) {
     stbi_set_flip_vertically_on_load(0);
     defer stbi_set_flip_vertically_on_load(0);
 
-    // the following lines let me do new anywhere and not have to care about memory because
-    // after this function is done all required data is stored to file.
+    /*
+    the following lines let me do new anywhere and not have to care about memory because
+    after this function is done all required data is stored to file.
+    */
     push_allocator(temp); // everything occurs on temporary storage
     auto_release_temp(); // when done temporary storage is reset, this is probably unnessary as someone's going to reset temp storage at some point.
 

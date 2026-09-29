@@ -50,6 +50,127 @@ find_packed_texture :: (lookup_table: *Table(string, Packed_Texture_Lookup), pat
     return result, found;
 }
 
+init_from_texture_paths :: (
+    using ptr: *Packed_Texture_Rendering_Base,
+    texture_paths: [] string,
+    side_length_px: int,
+) {
+    slog_scoped("init packed textures directly from sources");
+
+    metadata = build_packed_texture_metadata(side_length_px, texture_paths);
+
+    max_container_index := -1;
+    for texture: metadata.textures {
+        max_container_index = max(max_container_index, texture.container_index);
+    }
+    num_containers := max_container_index + 1;
+    if num_containers <= 0 return;
+
+    gl_set_integer_pixel_storage_parameter(GL_UNPACK_ALIGNMENT, 1);
+    gl_set_integer_pixel_storage_parameter(GL_UNPACK_ROW_LENGTH, 0);
+    gl_set_integer_pixel_storage_parameter(GL_UNPACK_SKIP_PIXELS, 0);
+    gl_set_integer_pixel_storage_parameter(GL_UNPACK_SKIP_ROWS, 0);
+    gl_set_active_texture_unit(GL_TEXTURE0);
+
+    packed_texture_array_gl_id = gl_create_texture();
+    gl_bind_texture_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY,
+        packed_texture_array_gl_id,
+    );
+    gl_define_3d_image_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY,
+        0,
+        GL_RGBA8,
+        xx side_length_px,
+        xx side_length_px,
+        xx num_containers,
+        0,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        null,
+    );
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    stbi_set_flip_vertically_on_load(0);
+    for texture: metadata.textures {
+        img_w, img_h, img_channels: s32;
+        pixels := stbi_load(
+            temp_c_string(texture.path),
+            *img_w,
+            *img_h,
+            *img_channels,
+            4,
+        );
+        if pixels == null {
+            log_error("Failed to load packed texture source: %", texture.path);
+            continue;
+        }
+
+        gl_update_3d_subimage_of_texture_bound_to_binding_target_of_active_texture_unit(
+            GL_TEXTURE_2D_ARRAY,
+            0,
+            xx texture.top_left_x,
+            xx texture.top_left_y,
+            xx texture.container_index,
+            xx img_w,
+            xx img_h,
+            1,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            pixels,
+        );
+        stbi_image_free(pixels);
+    }
+    stbi_set_flip_vertically_on_load(0);
+    gl_set_integer_pixel_storage_parameter(GL_UNPACK_ALIGNMENT, 4);
+
+    MAX_NUM_TEXTURES :: 1024;
+    bounding_boxes: [MAX_NUM_TEXTURES] Vector4;
+    for texture, texture_index: metadata.textures {
+        if texture_index >= MAX_NUM_TEXTURES break;
+        bounding_boxes[texture_index] = .{
+            cast(float) texture.top_left_x / cast(float) side_length_px,
+            cast(float) texture.top_left_y / cast(float) side_length_px,
+            cast(float) texture.w / cast(float) side_length_px,
+            cast(float) texture.h / cast(float) side_length_px,
+        };
+    }
+
+    gl_set_active_texture_unit(GL_TEXTURE1);
+    packed_texture_bounding_boxes_gl_id = gl_create_texture();
+    gl_bind_texture_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_1D,
+        packed_texture_bounding_boxes_gl_id,
+    );
+    gl_define_1d_image_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_1D,
+        0,
+        GL_RGBA32F,
+        MAX_NUM_TEXTURES,
+        0,
+        GL_RGBA,
+        GL_FLOAT,
+        bounding_boxes.data,
+    );
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl_set_active_texture_unit(GL_TEXTURE0);
+
+    log("Uploaded % source textures directly into % GPU container(s)",
+        metadata.textures.count, num_containers);
+}
+
 // you can combine this with a packed texture renderer to make life easier
 Packed_Texture_Rendering_Base :: struct {
 
@@ -115,8 +236,10 @@ init :: (
 
     log("Container dimensions: %x%, % containers", side, side, num_containers);
 
-    // reset pixel store parameters to defaults so that no previous opengl state
-    // from simp or other renderers corrupts our texture upload
+    /*
+    reset pixel store parameters to defaults so that no previous opengl state
+    from simp or other renderers corrupts our texture upload
+    */
     gl_set_integer_pixel_storage_parameter(GL_UNPACK_ALIGNMENT, 1);
     gl_set_integer_pixel_storage_parameter(GL_UNPACK_ROW_LENGTH, 0);
     gl_set_integer_pixel_storage_parameter(GL_UNPACK_SKIP_PIXELS, 0);
@@ -148,7 +271,7 @@ init :: (
         null,
     );
 
-    // PBR material textures should interpolate smoothly; nearest filtering makes them look blocky.
+    // pbr material textures should interpolate smoothly; nearest filtering makes them look blocky.
     gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
         GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
@@ -160,10 +283,12 @@ init :: (
     gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
         GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    // Keep packed atlas uploads in the same row order used by the source
-    // textures and by the direct glTF texture upload path. Flipping the atlas
-    // here mirrors every packed sub-rectangle vertically, which makes glTF UVs
-    // sample the wrong part of shared packed layers.
+    /*
+    keep packed atlas uploads in the same row order used by the source
+    textures and by the direct glTF texture upload path. Flipping the atlas
+    here mirrors every packed sub-rectangle vertically, which makes glTF UVs
+    sample the wrong part of shared packed layers.
+    */
     stbi_set_flip_vertically_on_load(0);
 
     // load each container image from disk and upload it into its corresponding layer in the texture array
@@ -199,10 +324,12 @@ init :: (
         }
     }
 
-    // Mip levels dramatically reduce cache pressure for distant surfaces.
-    // Only expose levels where every packed rectangle remains aligned to the
-    // mip texel grid. That prevents glGenerateMipmap from averaging adjacent
-    // packed materials together while it downsamples the container.
+    /*
+    mip levels dramatically reduce cache pressure for distant surfaces.
+    Only expose levels where every packed rectangle remains aligned to the
+    mip texel grid. That prevents glGenerateMipmap from averaging adjacent
+    packed materials together while it downsamples the container.
+    */
     if generate_mipmaps {
         max_safe_mip_level := 30;
         for texture: metadata.textures {
@@ -253,8 +380,10 @@ init :: (
     // restore default alignment after we're done uploading
     gl_set_integer_pixel_storage_parameter(GL_UNPACK_ALIGNMENT, 4);
 
-    // now build the 1d texture that stores bounding boxes for each packed texture
-    // each texel is a vec4 holding the normalized uv region within its container
+    /*
+    now build the 1d texture that stores bounding boxes for each packed texture
+    each texel is a vec4 holding the normalized uv region within its container
+    */
     MAX_NUM_TEXTURES :: 1024;
     bounding_boxes: [MAX_NUM_TEXTURES] Vector4;
 
@@ -374,8 +503,10 @@ load_wavefront_into_packed_texture_renderables :: (
             }
         }
 
-        // walk all faces, triangulate them via fan, and build vertex and index data
-        // we fully de-index the obj data so each face vertex becomes its own vertex in the renderable
+        /*
+        walk all faces, triangulate them via fan, and build vertex and index data
+        we fully de-index the obj data so each face vertex becomes its own vertex in the renderable
+        */
 
         vertex_count: u32 = 0;
 
@@ -402,8 +533,10 @@ load_wavefront_into_packed_texture_renderables :: (
                     tc = model.obj_data.all_texture_coordinates[fv.texture_coordinate_index];
 
                     if has_texture {
-                        // the metadata stores: top_left_x, top_left_y, w, h in pixel space
-                        // convert the model's [0,1] uvs into the sub-region of the packed texture
+                        /*
+                        the metadata stores: top_left_x, top_left_y, w, h in pixel space
+                        convert the model's [0,1] uvs into the sub-region of the packed texture
+                        */
                         side := cast(float) metadata.side_length_px;
 
                         u_min  := cast(float) metadata.textures[tex_lookup.metadata_index].top_left_x / side;
@@ -446,8 +579,10 @@ load_wavefront_into_packed_texture_renderables :: (
                 vertex_count += 1;
             }
 
-            // fan triangulation: for an n-gon with vertices [0..n-1]
-            // produce triangles (0,1,2), (0,2,3), ..., (0,n-2,n-1)
+            /*
+            fan triangulation: for an n-gon with vertices [0..n-1]
+            produce triangles (0,1,2), (0,2,3), ..., (0,n-2,n-1)
+            */
             for tri: 0..cast(int)(num_face_verts - 3) {
                 array_add(*renderable.indices, first_index_for_face);
                 array_add(*renderable.indices, first_index_for_face + cast(u32)(tri + 1));
