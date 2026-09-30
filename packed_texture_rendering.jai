@@ -201,6 +201,7 @@ bind_packed_textures :: (using ptrb : Packed_Texture_Rendering_Base) {
 init :: (
     using ptr: *Packed_Texture_Rendering_Base,
     generate_mipmaps: bool = false,
+    compress_packed_texture_array_on_gpu: bool = false,
 ) {
 
     slog_scoped("init packed_texture_rendering_base");
@@ -257,11 +258,16 @@ init :: (
         packed_texture_array_gl_id,
     );
 
-    // allocate gpu storage for the 2d texture array with one layer per container, rgba8 format
+    texture_array_internal_format: GLint = cast(GLint) GL_RGBA8;
+    if compress_packed_texture_array_on_gpu {
+        // let the driver choose a supported block-compressed RGBA format while
+        // still accepting the unpacked PNG pixels uploaded below.
+        texture_array_internal_format = cast(GLint) GL_COMPRESSED_RGBA;
+    }
     gl_define_3d_image_for_texture_bound_to_binding_target_of_active_texture_unit(
         GL_TEXTURE_2D_ARRAY,
         0,
-        GL_RGBA8,
+        texture_array_internal_format,
         xx side,
         xx side,
         xx num_containers,
@@ -372,6 +378,27 @@ init :: (
             log("Packed material textures use % safe mip level(s)",
                 packed_texture_max_mip_level);
         }
+    }
+
+    texture_is_compressed: GLint;
+    base_level_compressed_bytes: GLint;
+    gl_get_integer_parameter_for_texture_level_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY,
+        0,
+        GL_TEXTURE_COMPRESSED,
+        *texture_is_compressed,
+    );
+    if texture_is_compressed != 0 {
+        gl_get_integer_parameter_for_texture_level_bound_to_binding_target_of_active_texture_unit(
+            GL_TEXTURE_2D_ARRAY,
+            0,
+            GL_TEXTURE_COMPRESSED_IMAGE_SIZE,
+            *base_level_compressed_bytes,
+        );
+        log("Packed material GPU base level is block compressed: % MiB",
+            cast(float64) base_level_compressed_bytes / (1024.0 * 1024.0));
+    } else {
+        log("Packed material GPU storage is uncompressed");
     }
 
     // reset flip state so we don't affect other stbi_load calls elsewhere
