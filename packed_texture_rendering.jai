@@ -173,13 +173,13 @@ init_from_texture_paths :: (
 
 /*
 Consumes the metadata ownership from a complete CPU Packed_Textures value and
-queues only backend installation work. Decoded image and bounding-box memory
-remain owned by textures and must live until the queue completes.
+installs its backend resources. When a budgeter is supplied, decoded image and
+bounding-box memory remain owned by textures until all budgeted work completes.
 */
-queue_packed_textures_opengl :: (
+install_packed_textures_opengl :: (
     using ptr: *Packed_Texture_Rendering_Base,
     textures: *Packed_Textures,
-    queue: *GL_Operation_Queue,
+    budgeter: *GL_Budgeter = null,
 ) -> bool {
     if textures.layer_count <= 0 || textures.metadata.textures.count == 0 {
         return false;
@@ -200,8 +200,8 @@ queue_packed_textures_opengl :: (
         GL_TEXTURE_2D_ARRAY,
         packed_texture_array_gl_id,
     );
-    gl_queue_define_3d_image_for_texture_bound_to_binding_target_of_active_texture_unit(
-        queue,
+    gl_define_3d_image_for_texture_bound_to_binding_target_of_active_texture_unit(
+        budgeter,
         GL_TEXTURE_2D_ARRAY,
         0,
         GL_RGBA8,
@@ -224,8 +224,8 @@ queue_packed_textures_opengl :: (
         GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
     for image: textures.images {
-        gl_queue_update_3d_subimage_of_texture_bound_to_binding_target_of_active_texture_unit(
-            queue,
+        gl_update_3d_subimage_of_texture_bound_to_binding_target_of_active_texture_unit(
+            budgeter,
             GL_TEXTURE_2D_ARRAY,
             0,
             image.destination_x,
@@ -250,8 +250,8 @@ queue_packed_textures_opengl :: (
         GL_TEXTURE_1D,
         packed_texture_bounding_boxes_gl_id,
     );
-    gl_queue_define_1d_image_for_texture_bound_to_binding_target_of_active_texture_unit(
-        queue,
+    gl_define_1d_image_for_texture_bound_to_binding_target_of_active_texture_unit(
+        budgeter,
         GL_TEXTURE_1D,
         0,
         GL_RGBA32F,
@@ -271,8 +271,13 @@ queue_packed_textures_opengl :: (
         GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     gl_set_active_texture_unit(GL_TEXTURE0);
 
-    log("Queued % decoded source textures for % GPU container(s)",
-        textures.images.count, textures.layer_count);
+    if budgeter {
+        log("Added % decoded source textures to the GL budgeter for % GPU container(s)",
+            textures.images.count, textures.layer_count);
+    } else {
+        log("Uploaded % decoded source textures directly into % GPU container(s)",
+            textures.images.count, textures.layer_count);
+    }
     return true;
 }
 
