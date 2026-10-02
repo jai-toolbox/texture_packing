@@ -180,6 +180,7 @@ install_packed_textures_opengl :: (
     using ptr: *Packed_Texture_Rendering_Base,
     textures: *Packed_Textures,
     budgeter: *GL_Budgeter = null,
+    compress_packed_texture_array_on_gpu: bool = false,
 ) -> bool {
     if textures.layer_count <= 0 || textures.metadata.textures.count == 0 {
         return false;
@@ -200,11 +201,15 @@ install_packed_textures_opengl :: (
         GL_TEXTURE_2D_ARRAY,
         packed_texture_array_gl_id,
     );
+    texture_array_internal_format: GLint = cast(GLint) GL_RGBA8;
+    if compress_packed_texture_array_on_gpu {
+        texture_array_internal_format = cast(GLint) GL_COMPRESSED_RGBA;
+    }
     gl_define_3d_image_for_texture_bound_to_binding_target_of_active_texture_unit(
         budgeter,
         GL_TEXTURE_2D_ARRAY,
         0,
-        GL_RGBA8,
+        texture_array_internal_format,
         xx side_length_px,
         xx side_length_px,
         xx textures.layer_count,
@@ -279,6 +284,92 @@ install_packed_textures_opengl :: (
             textures.images.count, textures.layer_count);
     }
     return true;
+}
+
+/*
+call this only after every budgeted packed-texture upload has completed. Mipmap
+generation reads the completed base level, so it cannot be queued ahead of the
+subimage operations that populate that level.
+
+in the future I just want to compute mipmaps manually and save them that way
+because we cannot split this function ane make it run at a realtime rate unfortunately.
+*/
+finalize_installed_packed_textures_opengl :: (
+    using ptr: *Packed_Texture_Rendering_Base,
+    generate_mipmaps: bool,
+) {
+    if packed_texture_array_gl_id == 0 return;
+
+    gl_set_active_texture_unit(GL_TEXTURE0);
+    gl_bind_texture_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY,
+        packed_texture_array_gl_id,
+    );
+
+    if generate_mipmaps {
+        max_safe_mip_level := 30;
+        for texture: metadata.textures {
+            texture_safe_mip_level := 0;
+            base_level_pixels_per_downsampled_texel := 2;
+            while downsampling_will_not_mix_packed_texture_with_neighbors(
+                texture,
+                base_level_pixels_per_downsampled_texel,
+            ) {
+                texture_safe_mip_level += 1;
+                base_level_pixels_per_downsampled_texel *= 2;
+            }
+            max_safe_mip_level = min(
+                max_safe_mip_level,
+                texture_safe_mip_level);
+        }
+
+        if max_safe_mip_level > 0 {
+            packed_texture_max_mip_level = cast(s32) max_safe_mip_level;
+            gl_generate_mipmap_levels_for_texture_bound_to_binding_target_of_active_texture_unit(
+                GL_TEXTURE_2D_ARRAY);
+            gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+                GL_TEXTURE_2D_ARRAY,
+                GL_TEXTURE_MAX_LEVEL,
+                packed_texture_max_mip_level);
+            gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+                GL_TEXTURE_2D_ARRAY,
+                GL_TEXTURE_MIN_FILTER,
+                GL_LINEAR_MIPMAP_LINEAR);
+            if gl.GL_EXT_texture_filter_anisotropic {
+                maximum_anisotropy: GLfloat;
+                gl_get_float_values_for_state_parameter(
+                    GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT,
+                    *maximum_anisotropy);
+                gl_set_float_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+                    GL_TEXTURE_2D_ARRAY,
+                    GL_TEXTURE_MAX_ANISOTROPY_EXT,
+                    min(4.0, maximum_anisotropy));
+            }
+            log("Packed material textures use % safe mip level(s)",
+                packed_texture_max_mip_level);
+        }
+    }
+
+    texture_is_compressed: GLint;
+    base_level_compressed_bytes: GLint;
+    gl_get_integer_parameter_for_texture_level_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY,
+        0,
+        GL_TEXTURE_COMPRESSED,
+        *texture_is_compressed,
+    );
+    if texture_is_compressed != 0 {
+        gl_get_integer_parameter_for_texture_level_bound_to_binding_target_of_active_texture_unit(
+            GL_TEXTURE_2D_ARRAY,
+            0,
+            GL_TEXTURE_COMPRESSED_IMAGE_SIZE,
+            *base_level_compressed_bytes,
+        );
+        log("Packed material GPU base level is block compressed: % MiB",
+            cast(float64) base_level_compressed_bytes / (1024.0 * 1024.0));
+    } else {
+        log("Packed material GPU storage is uncompressed");
+    }
 }
 
 // you can combine this with a packed texture renderer to make life easier
