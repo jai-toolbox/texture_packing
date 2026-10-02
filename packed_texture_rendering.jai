@@ -171,6 +171,111 @@ init_from_texture_paths :: (
         metadata.textures.count, num_containers);
 }
 
+/*
+Consumes the metadata ownership from a complete CPU Packed_Textures value and
+queues only backend installation work. Decoded image and bounding-box memory
+remain owned by textures and must live until the queue completes.
+*/
+queue_packed_textures_opengl :: (
+    using ptr: *Packed_Texture_Rendering_Base,
+    textures: *Packed_Textures,
+    queue: *GL_Operation_Queue,
+) -> bool {
+    if textures.layer_count <= 0 || textures.metadata.textures.count == 0 {
+        return false;
+    }
+
+    metadata = textures.metadata;
+    textures.metadata = .{};
+    side_length_px := metadata.side_length_px;
+
+    gl_set_integer_pixel_storage_parameter(GL_UNPACK_ALIGNMENT, 1);
+    gl_set_integer_pixel_storage_parameter(GL_UNPACK_ROW_LENGTH, 0);
+    gl_set_integer_pixel_storage_parameter(GL_UNPACK_SKIP_PIXELS, 0);
+    gl_set_integer_pixel_storage_parameter(GL_UNPACK_SKIP_ROWS, 0);
+    gl_set_active_texture_unit(GL_TEXTURE0);
+
+    packed_texture_array_gl_id = gl_create_texture();
+    gl_bind_texture_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY,
+        packed_texture_array_gl_id,
+    );
+    gl_queue_define_3d_image_for_texture_bound_to_binding_target_of_active_texture_unit(
+        queue,
+        GL_TEXTURE_2D_ARRAY,
+        0,
+        GL_RGBA8,
+        xx side_length_px,
+        xx side_length_px,
+        xx textures.layer_count,
+        0,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        null,
+        cast(s64) side_length_px * side_length_px * textures.layer_count * 4,
+    );
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    for image: textures.images {
+        gl_queue_update_3d_subimage_of_texture_bound_to_binding_target_of_active_texture_unit(
+            queue,
+            GL_TEXTURE_2D_ARRAY,
+            0,
+            image.destination_x,
+            image.destination_y,
+            image.destination_layer,
+            xx image.width,
+            xx image.height,
+            1,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            image.pixels.data,
+            image.pixels.count,
+            cast(s64) image.width * 4,
+            .BORROW_UNTIL_COMPLETE,
+        );
+    }
+    gl_set_integer_pixel_storage_parameter(GL_UNPACK_ALIGNMENT, 4);
+
+    gl_set_active_texture_unit(GL_TEXTURE1);
+    packed_texture_bounding_boxes_gl_id = gl_create_texture();
+    gl_bind_texture_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_1D,
+        packed_texture_bounding_boxes_gl_id,
+    );
+    gl_queue_define_1d_image_for_texture_bound_to_binding_target_of_active_texture_unit(
+        queue,
+        GL_TEXTURE_1D,
+        0,
+        GL_RGBA32F,
+        MAX_NUM_PACKED_TEXTURES,
+        0,
+        GL_RGBA,
+        GL_FLOAT,
+        textures.bounding_boxes.data,
+        textures.bounding_boxes.count * size_of(Vector4),
+        .BORROW_UNTIL_COMPLETE,
+    );
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+        GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl_set_active_texture_unit(GL_TEXTURE0);
+
+    log("Queued % decoded source textures for % GPU container(s)",
+        textures.images.count, textures.layer_count);
+    return true;
+}
+
 // you can combine this with a packed texture renderer to make life easier
 Packed_Texture_Rendering_Base :: struct {
 

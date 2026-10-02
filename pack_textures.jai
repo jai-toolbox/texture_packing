@@ -67,11 +67,48 @@ Packed_Texture :: struct {
 
 #import "Sort";
 #import "File";
+#import "Math";
 #import "tbx/serialize";
+
+MAX_NUM_PACKED_TEXTURES :: 1024;
 
 Packed_Textures_Metadata :: struct {
     side_length_px : int; // could be unsigned but probably doesn't matter
     textures: [..] Packed_Texture;
+}
+
+/*
+The canonical CPU representation of packed textures. It contains decoded
+pixels and placement metadata, but no graphics-API objects. This lets asset
+jobs perform image decoding and layout work without an OpenGL or Vulkan
+context.
+*/
+Packed_Texture_Image :: struct {
+    pixels: [..] u8;
+    width: s32;
+    height: s32;
+    destination_x: s32;
+    destination_y: s32;
+    destination_layer: s32;
+}
+
+Packed_Textures :: struct {
+    metadata: Packed_Textures_Metadata;
+    images: [..] Packed_Texture_Image;
+    bounding_boxes: [..] Vector4;
+    layer_count: s32;
+}
+
+deinit :: (textures: *Packed_Textures) {
+    for *image: textures.images array_free(image.pixels);
+    array_free(textures.images);
+    array_free(textures.bounding_boxes);
+
+    for *texture: textures.metadata.textures {
+        if texture.path.count > 0 free(texture.path);
+    }
+    array_free(textures.metadata.textures);
+    textures.* = .{};
 }
 
 recommended_texture_pack_side_length :: (
@@ -180,6 +217,68 @@ build_packed_texture_metadata :: (
         }
     }
     return metadata;
+}
+
+load_packed_textures :: (
+    texture_paths: [] string,
+    side_length_px: int = 0,
+) -> Packed_Textures {
+    result: Packed_Textures;
+    if texture_paths.count == 0 return result;
+
+    side_length := side_length_px;
+    if side_length <= 0 {
+        side_length = recommended_texture_pack_side_length(texture_paths);
+    }
+    result.metadata = build_packed_texture_metadata(side_length, texture_paths);
+
+    maximum_container_index := -1;
+    for texture: result.metadata.textures {
+        maximum_container_index = max(maximum_container_index, texture.container_index);
+    }
+    result.layer_count = cast(s32) (maximum_container_index + 1);
+    if result.layer_count <= 0 return result;
+
+    array_resize(*result.bounding_boxes, MAX_NUM_PACKED_TEXTURES);
+    for texture, texture_index: result.metadata.textures {
+        if texture_index >= MAX_NUM_PACKED_TEXTURES break;
+        result.bounding_boxes[texture_index] = .{
+            cast(float) texture.top_left_x / cast(float) side_length,
+            cast(float) texture.top_left_y / cast(float) side_length,
+            cast(float) texture.w / cast(float) side_length,
+            cast(float) texture.h / cast(float) side_length,
+        };
+    }
+
+    // stb exposes a thread-local override specifically for worker decoding.
+    stbi_set_flip_vertically_on_load_thread(0);
+    for texture: result.metadata.textures {
+        image: Packed_Texture_Image;
+        image.destination_x = cast(s32) texture.top_left_x;
+        image.destination_y = cast(s32) texture.top_left_y;
+        image.destination_layer = cast(s32) texture.container_index;
+
+        channels: s32;
+        decoded_pixels := stbi_load(
+            temp_c_string(texture.path),
+            *image.width,
+            *image.height,
+            *channels,
+            4,
+        );
+        if decoded_pixels == null {
+            log_error("Failed to decode packed texture source: %", texture.path);
+            continue;
+        }
+
+        byte_count := cast(s64) image.width * cast(s64) image.height * 4;
+        array_resize(*image.pixels, byte_count);
+        memcpy(image.pixels.data, decoded_pixels, byte_count);
+        stbi_image_free(decoded_pixels);
+        array_add(*result.images, image);
+    }
+
+    return result;
 }
 
 pack_texture_paths :: (side_length_px: int, force: bool, texture_paths: [..] string) {
