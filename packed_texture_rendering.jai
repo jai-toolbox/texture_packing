@@ -12,12 +12,12 @@ PACKED_TEXTURE_VERBOSE_LOGGING :: false;
 
 Packed_Texture_Lookup :: struct {
     metadata_index: s32; // what is this again?
-    container_index: s32;
+    page_index: s32;
 }
 
 
 downsampling_will_not_mix_packed_texture_with_neighbors :: (
-    texture: Packed_Texture,
+    texture: Packed_Texture_Metadata,
     base_level_pixels_per_downsampled_texel: int,
 ) -> bool {
     texture_has_at_least_one_downsampled_texel_per_axis :=
@@ -39,7 +39,7 @@ build_packed_texture_lookup_table :: (metadata: *Packed_Textures_Metadata) -> Ta
     for tex, idx: metadata.textures {
         table_add(*table, tex.path, Packed_Texture_Lookup.{
             metadata_index = cast(s32) idx,
-            container_index = cast(s32) tex.container_index,
+            page_index = cast(s32) tex.page_index,
         });
     }
     return table;
@@ -59,12 +59,12 @@ init_from_texture_paths :: (
 
     metadata = build_packed_texture_metadata(side_length_px, texture_paths);
 
-    max_container_index := -1;
+    max_page_index := -1;
     for texture: metadata.textures {
-        max_container_index = max(max_container_index, texture.container_index);
+        max_page_index = max(max_page_index, texture.page_index);
     }
-    num_containers := max_container_index + 1;
-    if num_containers <= 0 return;
+    page_count := max_page_index + 1;
+    if page_count <= 0 return;
 
     gl_set_integer_pixel_storage_parameter(GL_UNPACK_ALIGNMENT, 1);
     gl_set_integer_pixel_storage_parameter(GL_UNPACK_ROW_LENGTH, 0);
@@ -83,7 +83,7 @@ init_from_texture_paths :: (
         GL_RGBA8,
         xx side_length_px,
         xx side_length_px,
-        xx num_containers,
+        xx page_count,
         0,
         GL_RGBA,
         GL_UNSIGNED_BYTE,
@@ -106,7 +106,7 @@ init_from_texture_paths :: (
             *img_w,
             *img_h,
             *img_channels,
-            4,
+            RGBA8_CHANNEL_COUNT,
         );
         if pixels == null {
             log_error("Failed to load packed texture source: %", texture.path);
@@ -118,7 +118,7 @@ init_from_texture_paths :: (
             0,
             xx texture.top_left_x,
             xx texture.top_left_y,
-            xx texture.container_index,
+            xx texture.page_index,
             xx img_w,
             xx img_h,
             1,
@@ -167,8 +167,8 @@ init_from_texture_paths :: (
         GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     gl_set_active_texture_unit(GL_TEXTURE0);
 
-    log("Uploaded % source textures directly into % GPU container(s)",
-        metadata.textures.count, num_containers);
+    log("Uploaded % source textures directly into % GPU page(s)",
+        metadata.textures.count, page_count);
 }
 
 /*
@@ -182,7 +182,7 @@ install_packed_textures_opengl :: (
     budgeter: *GL_Budgeter = null,
     compress_packed_texture_array_on_gpu: bool = false,
 ) -> bool {
-    if textures.layer_count <= 0 || textures.metadata.textures.count == 0 {
+    if textures.page_count <= 0 || textures.metadata.textures.count == 0 {
         return false;
     }
 
@@ -205,20 +205,43 @@ install_packed_textures_opengl :: (
     if compress_packed_texture_array_on_gpu {
         texture_array_internal_format = cast(GLint) GL_COMPRESSED_RGBA;
     }
-    gl_define_3d_image_for_texture_bound_to_binding_target_of_active_texture_unit(
-        budgeter,
-        GL_TEXTURE_2D_ARRAY,
-        0,
-        texture_array_internal_format,
-        xx side_length_px,
-        xx side_length_px,
-        xx textures.layer_count,
-        0,
-        GL_RGBA,
-        GL_UNSIGNED_BYTE,
-        null,
-        cast(s64) side_length_px * side_length_px * textures.layer_count * 4,
-    );
+    log("Packed material texture GPU compression requested: % (internal format %)",
+        compress_packed_texture_array_on_gpu,
+        texture_array_internal_format);
+    
+    // allocate every mip level before its independently generated images are
+    // uploaded. OpenGL requires every mip in a texture array to retain the
+    // same layer count, so a page cannot disappear after its packed regions
+    // reach 1x1. those deeper layer images exist as storage but contain no
+    // valid separate material texels; the shader clamps that page to its last
+    // valid mip while larger-texture pages continue to deeper mip levels.
+    // we later fill these in from the textures that are in the textures array
+    // that array contains all valid mip levels of every texture so for those
+    // that dont exist at a particular mip level they simply dont get added
+    // and the memory there in that 2d texture array just is uninitialized
+    // and we have to guard against non-existing mip levels for particular
+    // textures in the shader.
+    for mipmap_level: 0..textures.max_mipmap_level {
+        mip_side_length_px := max(1, side_length_px >> mipmap_level);
+        gl_define_3d_image_for_texture_bound_to_binding_target_of_active_texture_unit(
+            budgeter,
+            GL_TEXTURE_2D_ARRAY,
+            mipmap_level,
+            texture_array_internal_format,
+            xx mip_side_length_px,
+            xx mip_side_length_px,
+            xx textures.page_count,
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            null,
+            cast(s64) mip_side_length_px
+                * mip_side_length_px
+                * textures.page_count
+                * RGBA8_BYTES_PER_PIXEL,
+        );
+    }
+    packed_texture_max_mip_level = textures.max_mipmap_level;
     gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
         GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
@@ -232,10 +255,10 @@ install_packed_textures_opengl :: (
         gl_update_3d_subimage_of_texture_bound_to_binding_target_of_active_texture_unit(
             budgeter,
             GL_TEXTURE_2D_ARRAY,
-            0,
+            image.mipmap_level,
             image.destination_x,
             image.destination_y,
-            image.destination_layer,
+            image.page_index,
             xx image.width,
             xx image.height,
             1,
@@ -243,7 +266,7 @@ install_packed_textures_opengl :: (
             GL_UNSIGNED_BYTE,
             image.pixels.data,
             image.pixels.count,
-            cast(s64) image.width * 4,
+            cast(s64) image.width * RGBA8_BYTES_PER_PIXEL,
             .BORROW_UNTIL_COMPLETE,
         );
     }
@@ -268,6 +291,7 @@ install_packed_textures_opengl :: (
         textures.bounding_boxes.count * size_of(Vector4),
         .BORROW_UNTIL_COMPLETE,
     );
+    // default options for a texture that is actually data (telling it not to change anything)
     gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
         GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
@@ -277,26 +301,23 @@ install_packed_textures_opengl :: (
     gl_set_active_texture_unit(GL_TEXTURE0);
 
     if budgeter {
-        log("Added % decoded source textures to the GL budgeter for % GPU container(s)",
-            textures.images.count, textures.layer_count);
+        log("Added % decoded source textures to the GL budgeter for % GPU page(s)",
+            textures.images.count, textures.page_count);
     } else {
-        log("Uploaded % decoded source textures directly into % GPU container(s)",
-            textures.images.count, textures.layer_count);
+        log("Uploaded % decoded source textures directly into % GPU page(s)",
+            textures.images.count, textures.page_count);
     }
     return true;
 }
 
 /*
-call this only after every budgeted packed-texture upload has completed. Mipmap
-generation reads the completed base level, so it cannot be queued ahead of the
-subimage operations that populate that level.
-
-in the future I just want to compute mipmaps manually and save them that way
-because we cannot split this function ane make it run at a realtime rate unfortunately.
+call this only after every budgeted packed-texture upload has completed. The
+mip pixels were generated on the CPU and uploaded with the base level, so this
+only enables sampling and reports the installed storage format.
 */
 finalize_installed_packed_textures_opengl :: (
     using ptr: *Packed_Texture_Rendering_Base,
-    generate_mipmaps: bool,
+    enable_precomputed_mipmaps: bool,
 ) {
     if packed_texture_array_gl_id == 0 return;
 
@@ -306,48 +327,36 @@ finalize_installed_packed_textures_opengl :: (
         packed_texture_array_gl_id,
     );
 
-    if generate_mipmaps {
-        max_safe_mip_level := 30;
-        for texture: metadata.textures {
-            texture_safe_mip_level := 0;
-            base_level_pixels_per_downsampled_texel := 2;
-            while downsampling_will_not_mix_packed_texture_with_neighbors(
-                texture,
-                base_level_pixels_per_downsampled_texel,
-            ) {
-                texture_safe_mip_level += 1;
-                base_level_pixels_per_downsampled_texel *= 2;
-            }
-            max_safe_mip_level = min(
-                max_safe_mip_level,
-                texture_safe_mip_level);
-        }
-
-        if max_safe_mip_level > 0 {
-            packed_texture_max_mip_level = cast(s32) max_safe_mip_level;
-            gl_generate_mipmap_levels_for_texture_bound_to_binding_target_of_active_texture_unit(
-                GL_TEXTURE_2D_ARRAY);
-            gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+    if enable_precomputed_mipmaps && packed_texture_max_mip_level > 0 {
+        gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+            GL_TEXTURE_2D_ARRAY,
+            GL_TEXTURE_MAX_LEVEL,
+            packed_texture_max_mip_level);
+        gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+            GL_TEXTURE_2D_ARRAY,
+            GL_TEXTURE_MIN_FILTER,
+            GL_LINEAR_MIPMAP_LINEAR);
+        if gl.GL_EXT_texture_filter_anisotropic {
+            maximum_anisotropy: GLfloat;
+            gl_get_float_values_for_state_parameter(
+                GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT,
+                *maximum_anisotropy);
+            gl_set_float_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
                 GL_TEXTURE_2D_ARRAY,
-                GL_TEXTURE_MAX_LEVEL,
-                packed_texture_max_mip_level);
-            gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
-                GL_TEXTURE_2D_ARRAY,
-                GL_TEXTURE_MIN_FILTER,
-                GL_LINEAR_MIPMAP_LINEAR);
-            if gl.GL_EXT_texture_filter_anisotropic {
-                maximum_anisotropy: GLfloat;
-                gl_get_float_values_for_state_parameter(
-                    GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT,
-                    *maximum_anisotropy);
-                gl_set_float_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
-                    GL_TEXTURE_2D_ARRAY,
-                    GL_TEXTURE_MAX_ANISOTROPY_EXT,
-                    min(4.0, maximum_anisotropy));
-            }
-            log("Packed material textures use % safe mip level(s)",
-                packed_texture_max_mip_level);
+                GL_TEXTURE_MAX_ANISOTROPY_EXT,
+                min(4.0, maximum_anisotropy));
         }
+        log("Packed material textures use % precomputed mip level(s)",
+            packed_texture_max_mip_level);
+    } else {
+        gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+            GL_TEXTURE_2D_ARRAY,
+            GL_TEXTURE_MAX_LEVEL,
+            0);
+        gl_set_integer_parameter_for_texture_bound_to_binding_target_of_active_texture_unit(
+            GL_TEXTURE_2D_ARRAY,
+            GL_TEXTURE_MIN_FILTER,
+            GL_LINEAR);
     }
 
     texture_is_compressed: GLint;
@@ -422,21 +431,21 @@ init :: (
 
     log("Loaded packed texture metadata with % entries", metadata.textures.count);
 
-    max_container_index := -1;
+    max_page_index := -1;
     for metadata.textures {
-        if it.container_index > max_container_index
-            max_container_index = it.container_index;
+        if it.page_index > max_page_index
+            max_page_index = it.page_index;
     }
-    num_containers := max_container_index + 1;
+    page_count := max_page_index + 1;
 
-    if num_containers <= 0 {
-        log_error("No packed texture containers found in metadata");
+    if page_count <= 0 {
+        log_error("No packed texture pages found in metadata");
         return;
     }
 
     side := metadata.side_length_px;
 
-    log("Container dimensions: %x%, % containers", side, side, num_containers);
+    log("Page dimensions: %x%, % pages", side, side, page_count);
 
     /*
     reset pixel store parameters to defaults so that no previous opengl state
@@ -471,7 +480,7 @@ init :: (
         texture_array_internal_format,
         xx side,
         xx side,
-        xx num_containers,
+        xx page_count,
         0,
         GL_RGBA,
         GL_UNSIGNED_BYTE,
@@ -498,26 +507,32 @@ init :: (
     */
     stbi_set_flip_vertically_on_load(0);
 
-    // load each container image from disk and upload it into its corresponding layer in the texture array
-    for container_idx: 0..num_containers - 1 {
-        container_path := tprint("data/packed_textures/packed_texture_%.png", container_idx);
+    // load each page image from disk and upload it into its corresponding layer in the texture array
+    for page_index: 0..page_count - 1 {
+        page_path := tprint("data/packed_textures/packed_texture_%.png", page_index);
         img_w, img_h, img_channels: s32;
-        image_loaded, image_data := load_asset(container_path);
+        image_loaded, image_data := load_asset(page_path);
         pixels: *u8;
         if image_loaded {
-            pixels = stbi_load_from_memory(image_data.data, xx image_data.count, *img_w, *img_h, *img_channels, 4);
+            pixels = stbi_load_from_memory(
+                image_data.data,
+                xx image_data.count,
+                *img_w,
+                *img_h,
+                *img_channels,
+                RGBA8_CHANNEL_COUNT);
         }
         if pixels != null {
             if img_w != xx side || img_h != xx side {
-                log_error("Container % has unexpected dimensions: %x% (expected %x%)", container_idx, img_w, img_h, side, side);
+                log_error("Page % has unexpected dimensions: %x% (expected %x%)", page_index, img_w, img_h, side, side);
             }
-            // upload this container's pixel data into the corresponding layer of the 2d texture array
+            // upload this page's pixel data into the corresponding layer of the 2d texture array
             gl_update_3d_subimage_of_texture_bound_to_binding_target_of_active_texture_unit(
                 GL_TEXTURE_2D_ARRAY,
                 0,
                 0,
                 0,
-                xx container_idx,
+                xx page_index,
                 xx img_w,
                 xx img_h,
                 1,
@@ -527,7 +542,7 @@ init :: (
             );
             stbi_image_free(pixels);
         } else {
-            log_error("Failed to load container image: %", container_path);
+            log_error("Failed to load page image: %", page_path);
         }
     }
 
@@ -535,7 +550,7 @@ init :: (
     mip levels dramatically reduce cache pressure for distant surfaces.
     Only expose levels where every packed rectangle remains aligned to the
     mip texel grid. That prevents glGenerateMipmap from averaging adjacent
-    packed materials together while it downsamples the container.
+    packed materials together while it downsamples the page.
     */
     if generate_mipmaps {
         max_safe_mip_level := 30;
@@ -610,7 +625,7 @@ init :: (
 
     /*
     now build the 1d texture that stores bounding boxes for each packed texture
-    each texel is a vec4 holding the normalized uv region within its container
+    each texel is a vec4 holding the normalized uv region within its page
     */
     MAX_NUM_TEXTURES :: 1024;
     bounding_boxes: [MAX_NUM_TEXTURES] Vector4;
@@ -629,8 +644,8 @@ init :: (
         bounding_boxes[tex_idx] = .{u_min, v_min, width, height};
 
         #if PACKED_TEXTURE_VERBOSE_LOGGING {
-            slog("bbox[%] path='%' container=% | top_left=(%,%) size=(%x%) | uv: u_min=% v_min=% width=% height=%",
-                tex_idx, tex.path, tex.container_index,
+            slog("bbox[%] path='%' page=% | top_left=(%,%) size=(%x%) | uv: u_min=% v_min=% width=% height=%",
+                tex_idx, tex.path, tex.page_index,
                 tex.top_left_x, tex.top_left_y, tex.w, tex.h,
                 u_min, v_min, width, height);
         }
@@ -671,7 +686,7 @@ init :: (
         GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 
 
-    log("Packed texture rendering initialized: % textures across % containers", metadata.textures.count, num_containers);
+    log("Packed texture rendering initialized: % textures across % pages", metadata.textures.count, page_count);
 }
 
 
@@ -790,9 +805,10 @@ load_wavefront_into_packed_texture_renderables :: (
                 }
                 array_add(*renderable.texture_coordinates, tc);
 
-                // which layer in the packed texture array this vertex samples from
+                // which packed texture page this vertex samples. the page
+                // becomes an OpenGL texture-array layer during upload.
                 if has_texture {
-                    array_add(*renderable.packed_texture_index, tex_lookup.container_index);
+                    array_add(*renderable.packed_texture_index, tex_lookup.page_index);
                 } else {
                     array_add(*renderable.packed_texture_index, 0);
                 }
