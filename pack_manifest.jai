@@ -24,12 +24,21 @@ Texture_File_Record :: struct {
 
 Texture_Pack_Manifest :: struct {
     side_length_px: int;
+    max_texture_side_px: int;
     records: [..] Texture_File_Record;
 }
 
 MANIFEST_PATH :: "data/packed_textures/pack_manifest.metadata";
 
-should_repack :: (current_paths: [..] string, side_length_px: int) -> bool {
+should_repack :: (
+    current_paths: [..] string,
+    side_length_px: int,
+    progress_callback: Texture_Packing_Progress_Proc = null,
+    progress_context: *void = null,
+    max_texture_side_px := 0,
+) -> bool {
+
+    texture_packing_report_progress(progress_callback, progress_context);
 
     manifest_string, manifest_ok := read_entire_file(MANIFEST_PATH);
     if !manifest_ok {
@@ -48,6 +57,12 @@ should_repack :: (current_paths: [..] string, side_length_px: int) -> bool {
         return true;
     }
 
+    if old_manifest.max_texture_side_px != max_texture_side_px {
+        log("Packed texture source limit changed (% vs %) repacking.",
+            max_texture_side_px, old_manifest.max_texture_side_px);
+        return true;
+    }
+
     // old records keyed by path
     old_records: Table(string, Texture_File_Record);
     for old_manifest.records {
@@ -61,18 +76,30 @@ should_repack :: (current_paths: [..] string, side_length_px: int) -> bool {
     }
 
     for current_paths {
-        sig := get_texture_file_record(it);
-
         found, old_record := table_find(*old_records, it);
         if !found {
             log("New file detected: '%' repacking.", it);
             return true;
         }
 
-        if sig.size != old_record.size || sig.content_hash != old_record.content_hash {
+        modification_time_low, modification_time_high, size := file_modtime_parts(it);
+        if size != old_record.size {
             log("Modified file detected: '%' repacking.", it);
             return true;
         }
+
+        // Most launches should only need this cheap metadata comparison. Hash
+        // file contents when a timestamp changed so replacing a file with
+        // identical contents still avoids an unnecessary atlas rebuild.
+        if modification_time_low != old_record.modification_time_low
+            || modification_time_high != old_record.modification_time_high {
+            content_hash := hash_file_contents(it, progress_callback, progress_context);
+            if content_hash != old_record.content_hash {
+                log("Modified file detected: '%' repacking.", it);
+                return true;
+            }
+        }
+        texture_packing_report_progress(progress_callback, progress_context);
     }
 
     // check if any packed texture no longer exists anymore
@@ -97,35 +124,54 @@ file_modtime_parts :: (path: string) -> u64, s64, s64 {
     return modtime.low, modtime.high, size;
 }
 
-hash_file_contents :: (path: string) -> u64 {
+hash_file_contents :: (
+    path: string,
+    progress_callback: Texture_Packing_Progress_Proc = null,
+    progress_context: *void = null,
+) -> u64 {
     data, ok := read_entire_file(path);
     if !ok return 0;
 
     hash: u64 = 14695981039346656037;
     FNV_PRIME :: 1099511628211;
-    for data {
-        hash ^= cast(u64) it;
+    for byte, byte_index: data {
+        hash ^= cast(u64) byte;
         hash *= FNV_PRIME;
+        if (byte_index & ((1 << 20) - 1)) == 0 {
+            texture_packing_report_progress(progress_callback, progress_context);
+        }
     }
 
     return hash;
 }
 
-get_texture_file_record :: (path: string) -> Texture_File_Record {
+get_texture_file_record :: (
+    path: string,
+    progress_callback: Texture_Packing_Progress_Proc = null,
+    progress_context: *void = null,
+) -> Texture_File_Record {
     record: Texture_File_Record;
     record.path = path;
     record.modification_time_low, record.modification_time_high, record.size = file_modtime_parts(path);
-    record.content_hash = hash_file_contents(path);
+    record.content_hash = hash_file_contents(path, progress_callback, progress_context);
     return record;
 }
 
-save_pack_manifest :: (texture_paths: [] string, side_length_px: int) {
+save_pack_manifest :: (
+    texture_paths: [] string,
+    side_length_px: int,
+    progress_callback: Texture_Packing_Progress_Proc = null,
+    progress_context: *void = null,
+    max_texture_side_px := 0,
+) {
     manifest: Texture_Pack_Manifest;
     manifest.side_length_px = side_length_px;
+    manifest.max_texture_side_px = max_texture_side_px;
 
     for texture_paths {
-        record := get_texture_file_record(it);
+        record := get_texture_file_record(it, progress_callback, progress_context);
         array_add(*manifest.records, record);
+        texture_packing_report_progress(progress_callback, progress_context);
     }
 
     manifest_string, ok := struct_to_string_pretty(manifest);

@@ -454,7 +454,14 @@ load_packed_textures :: (texture_paths: [] string, side_length_px: int = 0) -> P
     return result;
 }
 
-pack_texture_paths :: (side_length_px: int, force: bool, texture_paths: [..] string) {
+pack_texture_paths :: (
+    side_length_px: int,
+    force: bool,
+    texture_paths: [..] string,
+    progress_callback: Texture_Packing_Progress_Proc = null,
+    progress_context: *void = null,
+    max_texture_side_px := 0,
+) {
     stbi_set_flip_vertically_on_load(0);
     defer stbi_set_flip_vertically_on_load(0);
 
@@ -467,7 +474,13 @@ pack_texture_paths :: (side_length_px: int, force: bool, texture_paths: [..] str
 
     slog_scoped("pack_textures");
 
-    if !force && !should_repack(texture_paths, side_length_px) {
+    if !force && !should_repack(
+        texture_paths,
+        side_length_px,
+        progress_callback,
+        progress_context,
+        max_texture_side_px,
+    ) {
         slog("All textures up to date, skipping repack.");
         return;
     }
@@ -478,6 +491,7 @@ pack_texture_paths :: (side_length_px: int, force: bool, texture_paths: [..] str
     texture_blocks: [..] *Texture_Block_To_Pack;
 
     for texture_paths {
+        texture_packing_report_progress(progress_callback, progress_context);
         w, h, channels: s32;
         ok := stbi_info(temp_c_string(it), *w, *h, *channels);
         if !ok {
@@ -488,6 +502,23 @@ pack_texture_paths :: (side_length_px: int, force: bool, texture_paths: [..] str
         block := New(Texture_Block_To_Pack);
         block.source_width = cast(int) w;
         block.source_height = cast(int) h;
+        if max_texture_side_px > 0
+            && (block.source_width > max_texture_side_px
+                || block.source_height > max_texture_side_px) {
+            if block.source_width >= block.source_height {
+                block.source_height = max(
+                    1,
+                    block.source_height * max_texture_side_px / block.source_width,
+                );
+                block.source_width = max_texture_side_px;
+            } else {
+                block.source_width = max(
+                    1,
+                    block.source_width * max_texture_side_px / block.source_height,
+                );
+                block.source_height = max_texture_side_px;
+            }
+        }
         block.w = next_power_of_two_for_texture_packing(block.source_width);
         block.h = next_power_of_two_for_texture_packing(block.source_height);
         block.path = it;
@@ -499,6 +530,7 @@ pack_texture_paths :: (side_length_px: int, force: bool, texture_paths: [..] str
     pages: [..] Packed_Texture_Page;
 
     for texture_blocks {
+        texture_packing_report_progress(progress_callback, progress_context);
         block := it;
         placed := false;
 
@@ -537,6 +569,7 @@ pack_texture_paths :: (side_length_px: int, force: bool, texture_paths: [..] str
     all_packed: [..] Packed_Texture_Metadata;
 
     for page, page_index: pages {
+        texture_packing_report_progress(progress_callback, progress_context);
         atlas_byte_count := side_length_px
             * side_length_px
             * RGBA8_BYTES_PER_PIXEL;
@@ -544,6 +577,7 @@ pack_texture_paths :: (side_length_px: int, force: bool, texture_paths: [..] str
         memset(image_data, 0, cast(s64) atlas_byte_count);
 
         for block: page.blocks {
+            texture_packing_report_progress(progress_callback, progress_context);
             placement := block.packed_placement;
             if placement == null continue;
 
@@ -560,8 +594,37 @@ pack_texture_paths :: (side_length_px: int, force: bool, texture_paths: [..] str
             }
             defer stbi_image_free(pixels);  // stbi uses C malloc, still needed (doesn't care about jai context)
 
-            for row: 0..cast(int) img_h - 1 {
-                src := pixels + row * img_w * RGBA8_BYTES_PER_PIXEL;
+            packed_pixels := pixels;
+            resized_pixels: *u8;
+            if cast(int) img_w != block.source_width
+                || cast(int) img_h != block.source_height {
+                resized_pixels = cast(*u8) alloc(
+                    block.source_width
+                    * block.source_height
+                    * RGBA8_BYTES_PER_PIXEL,
+                );
+                resize_ok := stbir_resize_uint8(
+                    pixels,
+                    img_w,
+                    img_h,
+                    0,
+                    resized_pixels,
+                    cast(s32) block.source_width,
+                    cast(s32) block.source_height,
+                    0,
+                    RGBA8_CHANNEL_COUNT,
+                );
+                if resize_ok == 0 {
+                    log_error("Failed to resize image for runtime atlas: %", block.path);
+                    free(resized_pixels);
+                    continue;
+                }
+                packed_pixels = resized_pixels;
+            }
+
+            for row: 0..block.source_height - 1 {
+                src := packed_pixels
+                    + row * block.source_width * RGBA8_BYTES_PER_PIXEL;
                 dst_x := placement.top_left_x;
                 dst_y := placement.top_left_y + row;
                 dst := image_data
@@ -570,8 +633,9 @@ pack_texture_paths :: (side_length_px: int, force: bool, texture_paths: [..] str
                 memcpy(
                     dst,
                     src,
-                    cast(s64) (img_w * RGBA8_BYTES_PER_PIXEL));
+                    cast(s64) (block.source_width * RGBA8_BYTES_PER_PIXEL));
             }
+            if resized_pixels != null free(resized_pixels);
 
             array_add(*all_packed, Packed_Texture_Metadata.{
                 top_left_x = placement.top_left_x,
@@ -593,6 +657,7 @@ pack_texture_paths :: (side_length_px: int, force: bool, texture_paths: [..] str
             xx (side_length_px * RGBA8_BYTES_PER_PIXEL)
         );
         log("Wrote atlas: % (% textures)", filename, page.blocks.count);
+        texture_packing_report_progress(progress_callback, progress_context);
     }
 
     //  serialize metadata and write to file
@@ -609,7 +674,13 @@ pack_texture_paths :: (side_length_px: int, force: bool, texture_paths: [..] str
         log_error("Failed to serialize packed texture metadata");
     }
 
-    save_pack_manifest(texture_paths, side_length_px);
+    save_pack_manifest(
+        texture_paths,
+        side_length_px,
+        progress_callback,
+        progress_context,
+        max_texture_side_px,
+    );
 }
 
 pack_textures :: (side_length_px: int = 256, force: bool = false, texture_directory: string) {

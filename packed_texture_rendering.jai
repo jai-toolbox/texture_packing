@@ -412,6 +412,8 @@ init :: (
     using ptr: *Packed_Texture_Rendering_Base,
     generate_mipmaps: bool = false,
     compress_packed_texture_array_on_gpu: bool = false,
+    progress_callback: Texture_Packing_Progress_Proc = null,
+    progress_context: *void = null,
 ) {
 
     slog_scoped("init packed_texture_rendering_base");
@@ -509,6 +511,7 @@ init :: (
 
     // load each page image from disk and upload it into its corresponding layer in the texture array
     for page_index: 0..page_count - 1 {
+        texture_packing_report_progress(progress_callback, progress_context);
         page_path := tprint("data/packed_textures/packed_texture_%.png", page_index);
         img_w, img_h, img_channels: s32;
         image_loaded, image_data := load_asset(page_path);
@@ -544,6 +547,7 @@ init :: (
         } else {
             log_error("Failed to load page image: %", page_path);
         }
+        texture_packing_report_progress(progress_callback, progress_context);
     }
 
     /*

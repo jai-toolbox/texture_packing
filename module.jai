@@ -1,5 +1,14 @@
 #import "tbx/section_logger";
 
+Texture_Packing_Progress_Proc :: #type (user_data: *void);
+
+texture_packing_report_progress :: inline (
+    callback: Texture_Packing_Progress_Proc,
+    user_data: *void,
+) {
+    if callback != null callback(user_data);
+}
+
 /*
 
 Why is this thing not called a texture atlas? It could have been, but then people already make models that use textures that are texture atlases.
