@@ -56,7 +56,7 @@ Texture_Block_To_Pack :: struct {
     */
 }
 
-Packed_Texture_Page :: struct {
+Texture_Page_Packing :: struct {
     packer: Split_Packer;
     blocks: [..] *Texture_Block_To_Pack;
     source_texture_width: int;
@@ -65,7 +65,7 @@ Packed_Texture_Page :: struct {
 
 // everything could be unsigned maybe do it later when you're bored and read this comment
 // its later and I read this comment and I dont care lol
-Packed_Texture_Metadata :: struct {
+Texture_Placement :: struct {
     top_left_x: int;
     top_left_y: int;
     w: int;
@@ -80,68 +80,97 @@ Packed_Texture_Metadata :: struct {
 #import "tbx/serialize";
 
 MAX_NUM_PACKED_TEXTURES :: 1024;
-PACKED_TEXTURE_ASSET_VERSION :: 1;
 
-Packed_Textures_Metadata :: struct {
+Packed_Texture_Layout :: struct {
     side_length_px : int; // could be unsigned but probably doesn't matter
-    textures: [..] Packed_Texture_Metadata;
+    textures: [..] Texture_Placement;
 }
 
-/*
-The canonical CPU representation of packed textures. It contains decoded
-pixels and placement metadata, but no graphics-API objects. This lets asset
-jobs perform image decoding and layout work without an OpenGL or Vulkan
-context.
-*/
-Packed_Texture_Image :: struct {
-    pixels: [..] u8;
-    width: s32;
-    height: s32;
-    destination_x: s32;
-    destination_y: s32;
-    page_index: s32;
-    mipmap_level: s32;
-}
-
-
-/*
-
-Right now this is doing way more than just what it says here. Given a collection of images
-it packs them so that images of the same dimensions end up on the same page, there will
-never be "mixed" resolution images on the same page. So given a bunch of images you get a
-specific sequences of pages for those images. 
-
-On top of this we are also generating a parallel identical page sequence for different mip levels
-
-So we have a page sequence for mip level 0 (original textures), then one for mip level 1, etc...
-
-We should probably do some cleanup here to make this more obvious later.
-
-*/
-
+// the saved CPU asset contains the finished page pixels and their source placements.
 Packed_Textures :: struct {
-    version: u32 = PACKED_TEXTURE_ASSET_VERSION;
-    metadata: Packed_Textures_Metadata;
-    
-    images: [..] Packed_Texture_Image;
-    // .{top_left_x, top_left_y, width, height} in [0,1]^4
-    bounding_boxes: [..] Vector4;
-    // every mip level of the OpenGL texture array has this same page count.
-    page_count: s32;
-    // this is the deepest mip needed by any page. pages containing smaller
-    // source textures become invalid sooner and are clamped in the shader.
-    max_mipmap_level: s32;
+    // true means every page at every mip is stored as BC3 (DXT5); false means RGBA8.
+    compressed: bool;
+    texture_placements: [..] Texture_Placement;
+    pages: Packed_Texture_Pages;
 }
+
+Packed_Texture_Pages_At_Mip_Level :: struct {
+    page_side_length_px: s32;
+    // all pages are contiguous: RGBA8 texel rows or BC3 block rows, as selected by compressed.
+    pixels: [..] u8;
+}
+
+Packed_Texture_Pages :: struct {
+    // mips[0] is the original resolution; each following entry halves the page dimensions.
+    mips: [..] Packed_Texture_Pages_At_Mip_Level;
+    page_count_per_mip_level: s32;
+}
+
+packed_texture_page_byte_count :: (side_length_px: s32, compressed: bool) -> s64 {
+    if compressed {
+        blocks_per_axis := (cast(s64) side_length_px + BC3_BLOCK_SIDE_LENGTH_PX - 1)
+            / BC3_BLOCK_SIDE_LENGTH_PX;
+        return blocks_per_axis * blocks_per_axis * BC3_BYTES_PER_BLOCK;
+    }
+    return cast(s64) side_length_px * side_length_px * RGBA8_BYTES_PER_PIXEL;
+}
+
+// returns a byte offset within the requested mip's pixel buffer.
+flatten_index :: (ptp: Packed_Texture_Pages, mip: s32, page: s32, compressed: bool = false) -> s64 {
+    assert(mip >= 0 && mip < ptp.mips.count);
+    assert(page >= 0 && page < ptp.page_count_per_mip_level);
+    level := *ptp.mips[mip];
+    assert(level.page_side_length_px > 0);
+    page_byte_count := packed_texture_page_byte_count(level.page_side_length_px, compressed);
+    return page * page_byte_count;
+}
+
+copy_texture_pixels_into_page :: (
+    pages: *Packed_Texture_Pages,
+    placement: Texture_Placement,
+    mipmap_level: s32,
+    pixels: *u8,
+    width: s32,
+    height: s32,
+) {
+    page_byte_offset := flatten_index(pages.*, mipmap_level, cast(s32) placement.page_index);
+    level := *pages.mips[mipmap_level];
+    destination_x := placement.top_left_x >> mipmap_level;
+    destination_y := placement.top_left_y >> mipmap_level;
+    assert(pixels != null && width > 0 && height > 0);
+    assert(destination_x >= 0 && destination_y >= 0);
+    assert(width <= level.page_side_length_px && height <= level.page_side_length_px);
+    assert(destination_x <= level.page_side_length_px - width);
+    assert(destination_y <= level.page_side_length_px - height);
+
+    source_row_byte_count := cast(s64) width * RGBA8_BYTES_PER_PIXEL;
+    destination_row_byte_count := cast(s64) level.page_side_length_px * RGBA8_BYTES_PER_PIXEL;
+    destination := level.pixels.data
+        + page_byte_offset
+        + destination_y * destination_row_byte_count
+        + destination_x * RGBA8_BYTES_PER_PIXEL;
+    for row: 0..height - 1 {
+        memcpy(
+            destination + row * destination_row_byte_count,
+            pixels + row * source_row_byte_count,
+            source_row_byte_count,
+        );
+    }
+}
+
+deinit :: (ptp: *Packed_Texture_Pages) {
+    for *level: ptp.mips array_free(level.pixels);
+    array_free(ptp.mips);
+    ptp.* = .{};
+}
+
 
 deinit :: (textures: *Packed_Textures) {
-    for *image: textures.images array_free(image.pixels);
-    array_free(textures.images);
-    array_free(textures.bounding_boxes);
-
-    for *texture: textures.metadata.textures {
+    deinit(*textures.pages);
+    for *texture: textures.texture_placements {
         if texture.path.count > 0 free(texture.path);
     }
-    array_free(textures.metadata.textures);
+    array_free(textures.texture_placements);
     textures.* = .{};
 }
 
@@ -155,10 +184,10 @@ packed_textures_match_paths :: (
     textures: *Packed_Textures,
     texture_paths: [] string,
 ) -> bool {
-    if textures.metadata.textures.count != texture_paths.count return false;
+    if textures.texture_placements.count != texture_paths.count return false;
     for path: texture_paths {
         found := false;
-        for texture: textures.metadata.textures {
+        for texture: textures.texture_placements {
             if texture.path == path {
                 found = true;
                 break;
@@ -170,25 +199,32 @@ packed_textures_match_paths :: (
 }
 
 packed_textures_valid :: (textures: *Packed_Textures) -> bool {
-    if textures.version != PACKED_TEXTURE_ASSET_VERSION return false;
-    if textures.metadata.side_length_px <= 0 return false;
-    if textures.metadata.textures.count <= 0
-        || textures.metadata.textures.count > MAX_NUM_PACKED_TEXTURES return false;
-    if textures.page_count <= 0 return false;
-    if textures.images.count < textures.metadata.textures.count return false;
-    if textures.bounding_boxes.count != MAX_NUM_PACKED_TEXTURES return false;
-    for image: textures.images {
-        if image.width <= 0 || image.height <= 0 return false;
-        if image.mipmap_level < 0
-            || image.mipmap_level > textures.max_mipmap_level return false;
-        expected_byte_count := cast(s64) image.width
-            * image.height
-            * RGBA8_BYTES_PER_PIXEL;
-        if image.pixels.count != expected_byte_count return false;
+    if textures.texture_placements.count <= 0
+        || textures.texture_placements.count > MAX_NUM_PACKED_TEXTURES return false;
+    pages := *textures.pages;
+    if pages.page_count_per_mip_level <= 0 || pages.mips.count <= 0 return false;
+    side_length_px := pages.mips[0].page_side_length_px;
+    if side_length_px <= 0 return false;
+    for level: pages.mips {
+        if level.page_side_length_px != side_length_px return false;
+        expected_byte_count := packed_texture_page_byte_count(side_length_px, textures.compressed)
+            * pages.page_count_per_mip_level;
+        if level.pixels.count != expected_byte_count return false;
+        side_length_px = max(cast(s32) 1, side_length_px / 2);
+    }
+    base_side_length_px := pages.mips[0].page_side_length_px;
+    for texture: textures.texture_placements {
+        if texture.page_index < 0 || texture.page_index >= pages.page_count_per_mip_level return false;
+        if texture.w <= 0 || texture.h <= 0
+            || texture.w > base_side_length_px || texture.h > base_side_length_px return false;
+        if texture.top_left_x < 0 || texture.top_left_y < 0
+            || texture.top_left_x > base_side_length_px - texture.w
+            || texture.top_left_y > base_side_length_px - texture.h return false;
     }
     return true;
 }
 
+// cache files follow the current struct layout; regenerate them after layout changes.
 save_packed_textures_asset :: (
     textures: *Packed_Textures,
     path: string,
@@ -236,8 +272,8 @@ recommended_texture_pack_side_length :: (
 }
 
 append_packed_texture_using_allocator :: (
-    metadata: *Packed_Textures_Metadata,
-    packed_texture: Packed_Texture_Metadata,
+    metadata: *Packed_Texture_Layout,
+    packed_texture: Texture_Placement,
     allocator: Allocator,
 ) {
     push_allocator(allocator);
@@ -251,8 +287,8 @@ computes atlas placement without creating, encoding, or writing atlas
 images. The returned metadata owns its path strings and can be kept by a
 renderer after the temporary packing nodes are released.
 */
-build_packed_texture_metadata :: (side_length_px: int, texture_paths: [] string) -> Packed_Textures_Metadata {
-    metadata: Packed_Textures_Metadata;
+build_packed_texture_metadata :: (side_length_px: int, texture_paths: [] string) -> Packed_Texture_Layout {
+    metadata: Packed_Texture_Layout;
     result_allocator := context.allocator;
     push_allocator(temp);
     auto_release_temp();
@@ -278,7 +314,7 @@ build_packed_texture_metadata :: (side_length_px: int, texture_paths: [] string)
 
     quick_sort(texture_blocks, (a, b) => b.source_height - a.source_height);
 
-    pages: [..] Packed_Texture_Page;
+    pages: [..] Texture_Page_Packing;
     for block: texture_blocks {
         placed := false;
         for *page: pages {
@@ -296,7 +332,7 @@ build_packed_texture_metadata :: (side_length_px: int, texture_paths: [] string)
         }
 
         if !placed {
-            new_page: Packed_Texture_Page;
+            new_page: Texture_Page_Packing;
             new_page.source_texture_width = block.source_width;
             new_page.source_texture_height = block.source_height;
             new_page.packer = make_split_packer(side_length_px, side_length_px);
@@ -334,124 +370,91 @@ build_packed_texture_metadata :: (side_length_px: int, texture_paths: [] string)
     return metadata;
 }
 
-load_packed_textures :: (texture_paths: [] string, side_length_px: int = 0) -> Packed_Textures {
+create :: (
+    texture_paths: [] string,
+    side_length_px: int = 0,
+    compress_pages: bool = false,
+) -> Packed_Textures {
     result: Packed_Textures;
     if texture_paths.count == 0 return result;
 
     side_length := side_length_px;
-    if side_length <= 0 {
-        side_length = recommended_texture_pack_side_length(texture_paths);
-    }
-    result.metadata = build_packed_texture_metadata(side_length, texture_paths);
+    if side_length <= 0 side_length = recommended_texture_pack_side_length(texture_paths);
+    metadata := build_packed_texture_metadata(side_length, texture_paths);
+    result.texture_placements = metadata.textures;
 
     maximum_page_index := -1;
-    for texture: result.metadata.textures {
+    max_mipmap_level: s32;
+    for texture: result.texture_placements {
         maximum_page_index = max(maximum_page_index, texture.page_index);
-    }
-    result.page_count = cast(s32) (maximum_page_index + 1);
-    if result.page_count <= 0 return result;
-
-    array_resize(*result.bounding_boxes, MAX_NUM_PACKED_TEXTURES);
-    for texture, texture_index: result.metadata.textures {
-        if texture_index >= MAX_NUM_PACKED_TEXTURES break;
-        // normalized, not pixels.
-        result.bounding_boxes[texture_index] = .{
-            cast(float) texture.top_left_x / cast(float) side_length,
-            cast(float) texture.top_left_y / cast(float) side_length,
-            cast(float) texture.w / cast(float) side_length,
-            cast(float) texture.h / cast(float) side_length,
-        };
-    }
-
-    // each source texture is downsampled independently, so no mip texel can
-    // average pixels from a neighboring packed texture.
-    stbi_set_flip_vertically_on_load_thread(0);
-    for original_texture: result.metadata.textures {
-        channels: s32;
-        base_width, base_height: s32;
-        decoded_pixels := stbi_load(
-            temp_c_string(original_texture.path),
-            *base_width,
-            *base_height,
-            *channels,
-            RGBA8_CHANNEL_COUNT,
-        );
-        if decoded_pixels == null {
-            log_error("Failed to decode packed texture source: %", original_texture.path);
-            continue;
-        }
-        if base_width != original_texture.w || base_height != original_texture.h {
-            log_error(
-                "Packed texture source dimensions changed for %: metadata=%x%, decoded=%x%",
-                original_texture.path,
-                original_texture.w,
-                original_texture.h,
-                base_width,
-                base_height);
-            stbi_image_free(decoded_pixels);
-            continue;
-        }
-
-        base_image: Packed_Texture_Image;
-        base_image.width = base_width;
-        base_image.height = base_height;
-        base_image.destination_x = cast(s32) original_texture.top_left_x;
-        base_image.destination_y = cast(s32) original_texture.top_left_y;
-        base_image.page_index = cast(s32) original_texture.page_index;
-        base_image.mipmap_level = 0;
-        base_byte_count := cast(s64) base_width
-            * base_height
-            * RGBA8_BYTES_PER_PIXEL;
-        array_resize(*base_image.pixels, base_byte_count);
-        memcpy(base_image.pixels.data, decoded_pixels, base_byte_count);
-        stbi_image_free(decoded_pixels);
-        array_add(*result.images, base_image);
-
-        previous_image_index := result.images.count - 1;
-        mipmap_level: s32 = 0;
-        // generate this source texture independently until its own 1x1 mip.
-        // no image is uploaded for this region at deeper shared-array levels;
-        // the sampling shader prevents this page from reaching those levels.
-        while min(result.images[previous_image_index].width, result.images[previous_image_index].height) > 1 {
-            // on the first iteration this is the base image created above;
-            // otherwise it is the last mip level generated below.
-            previous := *result.images[previous_image_index];
+        mipmap_level: s32;
+        smaller_dimension := min(texture.w, texture.h);
+        while smaller_dimension > 1 {
+            smaller_dimension /= 2;
             mipmap_level += 1;
-
-            image: Packed_Texture_Image;
-            image.width = max(cast(s32) 1, previous.width / 2);
-            image.height = max(cast(s32) 1, previous.height / 2);
-
-            image.destination_x = cast(s32) (original_texture.top_left_x >> mipmap_level);
-            image.destination_y = cast(s32) (original_texture.top_left_y >> mipmap_level);
-
-            image.page_index = cast(s32) original_texture.page_index;
-            image.mipmap_level = mipmap_level;
-            byte_count := cast(s64) image.width * image.height * RGBA8_BYTES_PER_PIXEL;
-
-            array_resize(*image.pixels, byte_count);
-
-            resize_success := stbir_resize_uint8(
-                previous.pixels.data,
-                previous.width,
-                previous.height,
-                previous.width * RGBA8_BYTES_PER_PIXEL,
-                image.pixels.data,
-                image.width,
-                image.height,
-                image.width * RGBA8_BYTES_PER_PIXEL,
-                RGBA8_CHANNEL_COUNT);
-            assert(resize_success != 0,
-                "Failed to generate mip % for '%'",
-                mipmap_level,
-                original_texture.path);
-            array_add(*result.images, image);
-            previous_image_index = result.images.count - 1;
         }
-        result.max_mipmap_level = max(result.max_mipmap_level, mipmap_level);
+        max_mipmap_level = max(max_mipmap_level, mipmap_level);
     }
+    page_count := cast(s32) (maximum_page_index + 1);
+    if page_count == 0 return result;
+    assert(page_count > 0 && side_length > 0 && max_mipmap_level >= 0);
 
+    result.pages.page_count_per_mip_level = page_count;
+    array_resize(*result.pages.mips, max_mipmap_level + 1);
+    mip_side_length_px := cast(s32) side_length;
+    for *level: result.pages.mips {
+        level.page_side_length_px = mip_side_length_px;
+        page_byte_count := cast(s64) mip_side_length_px
+            * mip_side_length_px * RGBA8_BYTES_PER_PIXEL;
+        // unused regions and levels beyond a page's last valid material mip stay zero.
+        array_resize(*level.pixels, page_byte_count * page_count);
+        mip_side_length_px = max(cast(s32) 1, mip_side_length_px / 2);
+    }
+    if !generate_all_mips(result.texture_placements, *result.pages) {
+        deinit(*result);
+        return .{};
+    }
+    if compress_pages compress_packed_texture_pages(*result);
     return result;
+}
+
+// compress the finished pages independently, preserving page and mip order.
+compress_packed_texture_pages :: (textures: *Packed_Textures) {
+    if textures.compressed return;
+    assert(packed_textures_valid(textures));
+    for *level: textures.pages.mips {
+        side := level.page_side_length_px;
+        blocks_per_axis := (cast(s64) side + BC3_BLOCK_SIDE_LENGTH_PX - 1) / BC3_BLOCK_SIDE_LENGTH_PX;
+        source_page_byte_count := packed_texture_page_byte_count(side, false);
+        compressed_page_byte_count := packed_texture_page_byte_count(side, true);
+        compressed_pixels: [..] u8;
+        array_resize(*compressed_pixels, compressed_page_byte_count * textures.pages.page_count_per_mip_level);
+        for page: 0..textures.pages.page_count_per_mip_level - 1 {
+            source := level.pixels.data + page * source_page_byte_count;
+            destination := compressed_pixels.data + page * compressed_page_byte_count;
+            for block_y: 0..blocks_per_axis - 1 {
+                for block_x: 0..blocks_per_axis - 1 {
+                    block: [BC3_BLOCK_SIDE_LENGTH_PX * BC3_BLOCK_SIDE_LENGTH_PX * RGBA8_BYTES_PER_PIXEL] u8 = ---;
+                    for y: 0..BC3_BLOCK_SIDE_LENGTH_PX - 1 {
+                        for x: 0..BC3_BLOCK_SIDE_LENGTH_PX - 1 {
+                            // repeat edge pixels for partial blocks and the 2x2/1x1 mips.
+                            source_x := min(block_x * BC3_BLOCK_SIDE_LENGTH_PX + x, side - 1);
+                            source_y := min(block_y * BC3_BLOCK_SIDE_LENGTH_PX + y, side - 1);
+                            memcpy(block.data + (y * BC3_BLOCK_SIDE_LENGTH_PX + x) * RGBA8_BYTES_PER_PIXEL,
+                                source + (source_y * side + source_x) * RGBA8_BYTES_PER_PIXEL,
+                                RGBA8_BYTES_PER_PIXEL);
+                        }
+                    }
+                    compress_bc3_block(
+                        destination + (block_y * blocks_per_axis + block_x) * BC3_BYTES_PER_BLOCK,
+                        block.data);
+                }
+            }
+        }
+        array_free(level.pixels);
+        level.pixels = compressed_pixels;
+    }
+    textures.compressed = true;
 }
 
 pack_texture_paths :: (
@@ -527,7 +530,7 @@ pack_texture_paths :: (
 
     quick_sort(texture_blocks, (a, b) => b.source_height - a.source_height);
 
-    pages: [..] Packed_Texture_Page;
+    pages: [..] Texture_Page_Packing;
 
     for texture_blocks {
         texture_packing_report_progress(progress_callback, progress_context);
@@ -546,7 +549,7 @@ pack_texture_paths :: (
         }
 
         if !placed {
-            new_page: Packed_Texture_Page;
+            new_page: Texture_Page_Packing;
             new_page.source_texture_width = block.source_width;
             new_page.source_texture_height = block.source_height;
             new_page.packer = make_split_packer(side_length_px, side_length_px);
@@ -566,7 +569,7 @@ pack_texture_paths :: (
 
     make_directory_if_it_does_not_exist("data/packed_textures");
 
-    all_packed: [..] Packed_Texture_Metadata;
+    all_packed: [..] Texture_Placement;
 
     for page, page_index: pages {
         texture_packing_report_progress(progress_callback, progress_context);
@@ -637,7 +640,7 @@ pack_texture_paths :: (
             }
             if resized_pixels != null free(resized_pixels);
 
-            array_add(*all_packed, Packed_Texture_Metadata.{
+            array_add(*all_packed, Texture_Placement.{
                 top_left_x = placement.top_left_x,
                 top_left_y = placement.top_left_y,
                 w = block.source_width,
@@ -662,7 +665,7 @@ pack_texture_paths :: (
 
     //  serialize metadata and write to file
 
-    metadata: Packed_Textures_Metadata;
+    metadata: Packed_Texture_Layout;
     metadata.textures = all_packed;
     metadata.side_length_px = side_length_px;
 
@@ -691,4 +694,63 @@ pack_textures :: (side_length_px: int = 256, force: bool = false, texture_direct
 pack_textures :: (side_length_px: int = 256, force: bool = false, texture_directories: [] string) {
     texture_paths := get_texture_paths(texture_directories);
     pack_texture_paths(side_length_px, force, texture_paths);
+}
+
+
+
+// generate one texture's mips at a time and copy each directly into the finished pages.
+generate_all_mips :: (
+    texture_placements: [] Texture_Placement,
+    pages: *Packed_Texture_Pages,
+) -> bool {
+    stbi_set_flip_vertically_on_load_thread(0);
+    for texture: texture_placements {
+        channels: s32;
+        width, height: s32;
+        decoded_pixels := stbi_load(
+            temp_c_string(texture.path), *width, *height, *channels, RGBA8_CHANNEL_COUNT);
+        if decoded_pixels == null {
+            log_error("Failed to decode packed texture source: %", texture.path);
+            return false;
+        }
+        defer stbi_image_free(decoded_pixels);
+        if width != texture.w || height != texture.h {
+            log_error("Packed texture source dimensions changed for %: metadata=%x%, decoded=%x%",
+                texture.path, texture.w, texture.h, width, height);
+            return false;
+        }
+
+        previous_pixels := decoded_pixels;
+        mip_pixels: [..] u8;
+        defer array_free(mip_pixels);
+        mipmap_level: s32;
+        while true {
+            copy_texture_pixels_into_page(pages, texture, mipmap_level, previous_pixels, width, height);
+            // the shader clamps this material to its final valid mip, even if
+            // larger materials require more levels in the shared texture array.
+            if min(width, height) == 1 break;
+
+            next_width := max(cast(s32) 1, width / 2);
+            next_height := max(cast(s32) 1, height / 2);
+            next_pixels: [..] u8;
+            array_resize(*next_pixels, cast(s64) next_width * next_height * RGBA8_BYTES_PER_PIXEL);
+            // resize the individual texture, so neighbors on its page cannot bleed into it.
+            resized := stbir_resize_uint8(
+                previous_pixels, width, height, width * RGBA8_BYTES_PER_PIXEL,
+                next_pixels.data, next_width, next_height, next_width * RGBA8_BYTES_PER_PIXEL,
+                RGBA8_CHANNEL_COUNT);
+            if resized == 0 {
+                array_free(next_pixels);
+                log_error("Failed to generate mip % for '%'", mipmap_level + 1, texture.path);
+                return false;
+            }
+            array_free(mip_pixels);
+            mip_pixels = next_pixels;
+            previous_pixels = mip_pixels.data;
+            width = next_width;
+            height = next_height;
+            mipmap_level += 1;
+        }
+    }
+    return true;
 }
