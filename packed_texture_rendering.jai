@@ -326,6 +326,10 @@ finalize_installed_packed_textures_opengl :: (
     using ptr: *Packed_Texture_Rendering_Base,
     enable_precomputed_mipmaps: bool,
 ) {
+    if retired_texture_array_gl_id != 0 {
+        gl_delete_texture(retired_texture_array_gl_id);
+        retired_texture_array_gl_id = 0;
+    }
     if packed_texture_array_gl_id == 0 return;
 
     gl_set_active_texture_unit(GL_TEXTURE0);
@@ -395,6 +399,13 @@ Packed_Texture_Rendering_Base :: struct {
     packed_texture_array_gl_id: GLuint;
     packed_texture_bounding_boxes_gl_id: GLuint;
     packed_texture_max_mip_level: s32;
+    // Independent asset sets keep this prefix resident between scenes.
+    resident_page_count: s32;
+    page_capacity: s32;
+    resident_compressed: bool;
+    persistent_page_count: s32;
+    persistent_texture_count: int;
+    retired_texture_array_gl_id: GLuint; // alive until budgeted prefix copies finish
 
 }
 

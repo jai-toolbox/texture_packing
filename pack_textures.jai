@@ -204,7 +204,15 @@ packed_textures_valid :: (textures: *Packed_Textures) -> bool {
     pages := *textures.pages;
     if pages.page_count_per_mip_level <= 0 || pages.mips.count <= 0 return false;
     side_length_px := pages.mips[0].page_side_length_px;
-    if side_length_px <= 0 return false;
+    if side_length_px <= 0 || side_length_px > 16384
+        || (side_length_px & (side_length_px - 1)) != 0 return false;
+    maximum_mip_count := 1;
+    remaining_side := side_length_px;
+    while remaining_side > 1 {
+        maximum_mip_count += 1;
+        remaining_side /= 2;
+    }
+    if pages.mips.count > maximum_mip_count return false;
     for level: pages.mips {
         if level.page_side_length_px != side_length_px return false;
         expected_byte_count := packed_texture_page_byte_count(side_length_px, textures.compressed)
@@ -220,38 +228,19 @@ packed_textures_valid :: (textures: *Packed_Textures) -> bool {
         if texture.top_left_x < 0 || texture.top_left_y < 0
             || texture.top_left_x > base_side_length_px - texture.w
             || texture.top_left_y > base_side_length_px - texture.h return false;
+        // The shader can sample through the final one-texel material mip.
+        required_mip_count := 1;
+        remaining := min(texture.w, texture.h);
+        while remaining > 1 {
+            required_mip_count += 1;
+            remaining /= 2;
+        }
+        if pages.mips.count < required_mip_count return false;
     }
     return true;
 }
 
-// cache files follow the current struct layout; regenerate them after layout changes.
-save_packed_textures_asset :: (
-    textures: *Packed_Textures,
-    path: string,
-) -> bool {
-    if !packed_textures_valid(textures) return false;
-    byte_count := size_when_serialized(textures.*);
-    bytes := alloc(byte_count);
-    defer free(bytes);
-    bytes_written := serialize(bytes, textures.*);
-    if bytes_written != byte_count return false;
-    return write_entire_file(path, bytes, bytes_written);
-}
-
-load_packed_textures_asset :: (path: string) -> success: bool, result: Packed_Textures {
-    file_contents, read_success := read_entire_file(path);
-    if !read_success return false, .{};
-    defer free(file_contents);
-
-    result, bytes_read := deserialize(
-        cast(*void) file_contents.data,
-        Packed_Textures);
-    if bytes_read != file_contents.count || !packed_textures_valid(*result) {
-        deinit(*result);
-        return false, .{};
-    }
-    return true, result;
-}
+#load "packed_texture_asset.jai";
 
 recommended_texture_pack_side_length :: (
     texture_paths: [] string,

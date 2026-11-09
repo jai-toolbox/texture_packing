@@ -27,3 +27,4 @@ This choice allows us to instantly disambiguate between atlases and packed textu
 #load "pack_textures.jai";
 #load "split_packer.jai";
 #load "packed_texture_rendering.jai";
+#load "packed_texture_sets.jai";
